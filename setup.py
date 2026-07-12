@@ -64,6 +64,11 @@ def clone_repo(org, name, root, token):
     url = f"https://{token}@github.com/{org}/{name}.git"
     print(f"  {name}: cloning into {dest}")
     subprocess.run(["git", "clone", url, str(dest)], check=True)
+    # Strip the token back out of the stored remote URL — git writes the
+    # clone URL verbatim into .git/config, which would otherwise leave the
+    # PAT sitting in plaintext on disk (and in any `git remote -v` output).
+    clean_url = f"https://github.com/{org}/{name}.git"
+    subprocess.run(["git", "-C", str(dest), "remote", "set-url", "origin", clean_url], check=True)
 
 
 def setup_board_spec_mcp(root):
