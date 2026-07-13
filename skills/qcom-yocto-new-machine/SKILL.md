@@ -12,7 +12,7 @@ description: >-
   spec already exists for the machine, falling back to asking the user for
   genuinely new boards. Optionally bumps recipes-bsp/partition/
   qcom-ptool.inc's SRCREV to a merged qcom-ptool commit (see Section 9),
-  then triggers a real kas-container build targeting qcom-multimedia-image
+  then triggers a real kas-container build targeting qcom-console-image
   (Section 10) — commits and opens a PR against the configured fork
   (`$DISTRO_GITHUB_ORG/meta-qcom` or `$DISTRO_GITHUB_ORG/meta-qcom-3rdparty`
   — see Section 0) via the GitHub REST API only if that build succeeds, and
@@ -75,6 +75,21 @@ env vars below and clones the repos this skill needs.
   done — it's reused by follow-up work (see Notes); only `distro-smith`'s
   own orchestration removes it, and only after that flow's
   `distro-params.yaml` is written.
+- **`DISTRO_AUTOPILOT`** (optional, defaults to unset/false) — set it (or
+  have the user ask to run this "non-interactively" / "just fill in
+  placeholders for anything missing") to switch to **autopilot**: never
+  call `AskUserQuestion` for a missing board fact for the rest of the run.
+  Every fact that would otherwise trigger a question instead gets a
+  `TODO_FILL_IN_<FIELD>` placeholder written directly into the generated
+  file. Keep a running list of every placeholder written (file + field),
+  and print it as a single outstanding-items summary before Section 10's
+  build (see that section) instead of interrupting mid-flow. Autopilot
+  still never fabricates a real-looking value (sha256sum, build ID,
+  download URL, node name) — a placeholder is the only allowed substitute
+  for a genuinely unknown fact. This matters because `distro-smith`'s
+  orchestrator can invoke this skill headlessly, with no one to answer an
+  `AskUserQuestion` prompt. Default (unset) keeps the normal
+  ask-when-missing flow described throughout this skill.
 
 ## 1. Pick the target layer
 
@@ -139,6 +154,39 @@ worthwhile follow-up — it makes both this skill and
 `qcom-partition-conf-new-board` reusable for this board without re-asking,
 but that authoring step is out of scope for this skill (it only reads).
 
+If `DISTRO_AUTOPILOT` is set (Section 0), skip asking the user for any of
+the above that's still unknown — write a `TODO_FILL_IN_<FIELD>` placeholder
+into the generated file instead (machine name and layer still can't be
+placeholder'd; if either is genuinely unknown, stop and ask regardless of
+autopilot, since nothing downstream can proceed without them) and add it to
+the running outstanding-items list (Section 0).
+
+Two fields are easy to skip past because they only matter once a later step
+needs them, so call them out explicitly rather than silently defaulting to
+a placeholder the first time they come up empty — unless autopilot is on,
+in which case go straight to the placeholder for both without asking:
+
+- `firmware_boot.bootbinaries_sha256sum` / `firmware_cdt.sha256sum` —
+  before writing `firmware-qcom-boot-<soc-or-board>.inc`/`.bb` or
+  `firmware-qcom-cdt-<soc-or-board>.bb` (Section 4/6), if either is still
+  unknown, ask the user directly for the real sha256sum via
+  `AskUserQuestion` — never offer to reuse another board's hash as if it
+  were verified. Only write the placeholder if the user picks that option,
+  or if autopilot is on.
+- `packagegroup.optional_feature_packages.wifi` — before writing
+  `packagegroup-<board>.bb` (Section 7), if the board's `MACHINE_FEATURES`
+  includes `wifi` (either explicitly or via the SoC include's default) and
+  this field is still unknown, ask the user for the wifi firmware
+  package(s) via `AskUserQuestion` rather than omitting the RRECOMMENDS
+  entry or guessing a package name. Only write the placeholder if the user
+  explicitly chooses that option, or if autopilot is on.
+- `fit_dtb_compatible` — before finishing Section 5, if this is still
+  empty, check `qcom-metadata.dts` (in the `qcom-dtb-metadata` fetch)
+  yourself for the real soc/board node names first — this is research, not
+  a question only the user can answer. Only fall back to asking the user
+  (or, in autopilot, to a placeholder) if no matching node exists yet
+  upstream — see Section 5.
+
 ## 3. Find the template to copy from
 
 ```sh
@@ -168,10 +216,11 @@ in meta-qcom-3rdparty for third-party style.
 If step 2 found a board-spec entry, populate the template directly from its
 `machine_creation` fields (`kernel_devicetree`, `cdt_file`,
 `boot_files_subdir`, `partition_files_subdir`, `boot_firmware`,
-`cdt_firmware`, `uboot_config`, `machine_features_add`) instead of asking
-the user for each one — only fall back to asking when a field is `null` in
-the spec and genuinely board-specific (e.g. no `uboot_config` because the
-board doesn't use u-boot-qcom).
+`cdt_firmware`, `uboot_config`, `machine_features_add`,
+`machine_features_set`) instead of asking the user for each one — only fall
+back to asking when a field is `null` in the spec and genuinely
+board-specific (e.g. no `uboot_config` because the board doesn't use
+u-boot-qcom).
 
 ```
 #@TYPE: Machine
@@ -207,7 +256,15 @@ Rules learned from the existing confs:
 - `MACHINE_FEATURES` uses `+=` when the SoC include already sets a base set
   (`qcom-qcs6490.inc` sets `alsa bluetooth usbgadget usbhost wifi`); use `=`
   only when the board must replace the base set entirely (rare — see
-  `kaanapali-mtp.conf`).
+  `kaanapali-mtp.conf`). If the board-spec entry has
+  `machine_creation.machine_features_set` populated, that's this rare case:
+  emit `MACHINE_FEATURES = "<the listed features>"` (replace, no `+=`)
+  instead of `machine_features_add`'s `+=` form — e.g. a board that drops a
+  feature the SoC include enables by default (no wifi firmware package
+  available yet) has to replace the whole set since `+=` can't subtract.
+  Only one of `machine_features_add`/`machine_features_set` should be
+  populated for a given board; if both are empty, fall back to asking the
+  user whether this board needs any delta from the SoC include's base set.
 - If the vendor's bootloader/firmware is flashed independently and not
   built by this layer, blank the `QCOM_BOOT_FIRMWARE` / `QCOM_CDT_*` /
   `QCOM_PARTITION_*` variables with a comment explaining why (see
@@ -233,6 +290,41 @@ Rules learned from the existing confs:
 Never invent DTB names, CDT file names, or firmware package/URL details —
 take them from the board-spec entry if one exists, otherwise ask the user;
 they come from the board's kernel/firmware delivery, not from convention.
+
+For the matching `recipes-bsp/packagegroups/packagegroup-<board>.bb`,
+`recipes-bsp/firmware-boot/firmware-qcom-boot-<soc-or-board>.inc`/`.bb`, and
+`recipes-bsp/firmware-boot/firmware-qcom-cdt-<soc-or-board>.bb` on a
+**meta-qcom reference board**, model on `qcm6490-idp` or `qcs9100-ride-sx`
+(e.g. `packagegroup-qcm6490-idp.bb`, `firmware-qcom-boot-qcs6490.inc` +
+`firmware-qcom-boot-qcs6490_<version>.bb`, `firmware-qcom-cdt-qcs6490.bb`) —
+their `FW_ARTIFACTORY`/`BOOTBINARIES` and `CDT_ARTIFACTORY` shape is the
+current mainline pattern. Avoid `kaanapali-mtp` as a recipe/packagegroup
+template — its `MACHINE_FEATURES = ` (replace-all) and package split are
+board-specific outliers, not representative of how most reference boards
+are configured.
+
+**`LIC_FILES_CHKSUM` points inside the bootbinaries tarball itself, not at
+a separately-fetched `LICENSE.txt`.** Every current `firmware-qcom-boot-*`
+`.inc` (e.g. `firmware-qcom-boot-qcs9100.inc`) uses:
+
+```
+LICENSE = "LICENSE.qcom-2"
+LIC_FILES_CHKSUM = "file://${UNPACKDIR}/${BOOTBINARIES}/LICENSE.qcom-2.txt;md5=<license_md5sum>"
+```
+
+Take `<license_md5sum>` from the board-spec entry's
+`firmware_boot.license_md5sum` when one exists — don't hardcode a specific
+md5 value from memory or from another board's recipe/documentation without
+cross-checking; a hardcoded value that's wrong for one board and copied
+into another board's recipe/notes is exactly how a data-entry error
+propagates (board-spec has recorded one such case in a `firmware_boot.notes`
+field — check there before trusting any md5 you find in docs). When
+scaffolding a genuinely new board with no board-spec entry yet, reuse the
+reference board's own recipe's md5 verbatim rather than typing a value in
+from a comment or template, since it's shared across every board on that
+same `LICENSE.qcom-2` text. Don't add a second `SRC_URI` entry to fetch
+`LICENSE.txt` separately — the license file is already unpacked as part of
+the same bootbinaries zip that `SRC_URI[bootbinaries.sha256sum]` covers.
 
 ## 5. Add `FIT_DTB_COMPATIBLE` entries in `fit-dtb-compatible.inc`
 
@@ -270,6 +362,54 @@ compatible string and DTB/overlay stems from the reference board's own
 `fit-dtb-compatible.inc` entry and adapt it — never invent the compatible
 string from scratch.
 
+**The key is NOT the kernel DTS's `compatible` property.** It looks similar
+but is a different, independently-maintained string defined by
+[qcom-dtb-metadata](https://github.com/qualcomm-linux/qcom-dtb-metadata)
+(`recipes-kernel/linux/qcom-dtb-metadata_<pv>.bb`, deployed as
+`qcom-metadata.dtb`), not derived from the DTS at all. `<soc-node>` and
+`<board-node>` in `qcom,<soc-node>-<board-node>[-<boardrev-node>]
+[-<subtype-node>...]` are literal node names from `qcom-metadata.dts`'s
+`soc { }` and `board { }` blocks in the `qcom-dtb-metadata` repo — **not**
+the SoC/board names used anywhere else in this layer, and often a different
+spelling than the kernel DTS's own `compatible` string. For example
+`hamoa-iot-evk.dts` declares `compatible = "qcom,hamoa-iot-evk", ...` but
+the matching entry is `FIT_DTB_COMPATIBLE[qcom_hamoa-evk]`, because
+`qcom-metadata.dts` names the SoC node `hamoa` (not `hamoa-iot`) and the
+board node `evk`. Never assume the DTS compatible string is reusable
+verbatim — always check the metadata source. This matters most when no
+board-spec entry and no matching reference-board `.inc` entry exist yet to
+copy from — reaching for the reference board's entry (above) only works
+when one actually covers this DTB combo already.
+
+**How to find the real soc/board node names** when neither a board-spec
+entry nor a reference-board `.inc` entry covers this DTB combo — don't
+guess or reuse the machine name:
+
+1. Check whether `qcom-metadata.dts` (in the `qcom-dtb-metadata` fetch,
+   under `build/tmp/work/*/qcom-dtb-metadata/*/` after a `do_fetch`/
+   `do_unpack`, or read directly from the pinned `SRCREV` on
+   https://github.com/qualcomm-linux/qcom-dtb-metadata) already has `soc {}`
+   sub-nodes for this SoC (added upstream ahead of the board landing in this
+   layer — this is common, since the chip ID allocation happens earlier than
+   BSP bring-up) and a `board {}` sub-node matching this board type (`evk`,
+   `idp`, `mtp`, `crd`, `qam`, etc.).
+2. If the SoC has multiple chip variants that need distinguishing (e.g. one
+   SoC family with several die/package SKUs, each producing its own DTB),
+   expect one `soc` node per variant — match each `KERNEL_DEVICETREE` base
+   DTB to its own variant node, not one shared node for all of them.
+3. If no matching `soc`/`board` node exists yet upstream, this is a real gap
+   — do not invent a `msm-id`/`board-id` value. Tell the user their new
+   board needs an entry added to `qcom-dtb-metadata` first (a separate PR to
+   that repo, out of scope for this layer), and (per Section 0's autopilot
+   mode, or if the user prefers) leave a
+   `TODO_FILL_IN_FIT_DTB_COMPATIBLE_<board>` placeholder rather than a
+   fabricated key.
+4. Camera/other overlays generally don't carry their own board-level
+   `compatible` override (they only add a `compatible` inside an internal
+   fragment node, e.g. for the sensor) — they're referenced purely as
+   additional `<overlay-stem>` entries appended to the base DTB's combo, not
+   as separate `FIT_DTB_COMPATIBLE` keys of their own.
+
 ## 6. New SoC only: scaffold `conf/machine/include/qcom-<soc>.inc` (meta-qcom)
 
 Only needed when step 3 found no existing include for this SoC — and only
@@ -299,6 +439,39 @@ MACHINE_EXTRA_RRECOMMENDS += " \
 Confirm the DEFAULTTUNE/arch include by checking what a same-generation SoC
 uses in `conf/machine/include/arm/` rather than guessing.
 
+`packagegroup-machine-essential-qcom-<soc>-soc` referenced above is a
+package inside the shared
+`recipes-bsp/packagegroups/packagegroup-machine-essential.bb`, not a
+separate recipe — add the new SoC there too, in the same pattern as every
+other SoC (alphabetically among the `${PN}-qcom-*-soc` entries):
+
+```
+PACKAGES = " \
+    ...
+    ${PN}-qcom-<soc>-soc \
+"
+
+RRECOMMENDS:${PN}-qcom-<soc>-soc += " \
+    ${PN}-board-generic \
+    ${PN}-qcom-generic \
+    kernel-module-<soc-specific-module> \
+    ...
+"
+```
+
+The SoC-specific kernel modules (camcc/dispcc/gpucc/videocc/etc. for that
+chip) come from the board-spec entry's `soc_kernel_modules` field — that
+field is populated only when scaffolding a genuinely new `soc_family` (see
+the schema's description), which is exactly this case, so use those values
+directly instead of asking. If it's `null`/empty (no board-spec entry, or
+the field wasn't filled in), ask the user for the SoC's kernel module list;
+if that's declined (or autopilot is on, per Section 0), add the entry with
+just `${PN}-board-generic`/`${PN}-qcom-generic` and a
+`TODO_FILL_IN_<SOC>_SOC_KERNEL_MODULES` placeholder — don't skip the
+`PACKAGES`/`RRECOMMENDS` entry entirely, since
+`MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS` in the SoC include above already
+depends on this package existing.
+
 ## 7. Third-party boards only: add the board's own recipes
 
 meta-qcom-3rdparty's `AGENTS.md` rule is **no recipe forks** — never copy a
@@ -318,7 +491,10 @@ new recipes for what is genuinely unique to this board:
   `QCOM_BOOT_IMG_SUBDIR`, `COMPATIBLE_MACHINE = "(<machine>)"`, and
   `include recipes-bsp/firmware-boot/firmware-qcom-boot-common.inc`. Skip
   this entirely for boards like Radxa Dragon Q6A where firmware is flashed
-  independently.
+  independently. Point `LIC_FILES_CHKSUM` at the license file already
+  inside that same fetched bundle (see Section 4's note on the in-tarball
+  `LIC_FILES_CHKSUM` pattern) — don't add a second `SRC_URI` entry and
+  `SRC_URI[license.sha256sum]` flag to fetch a `LICENSE.txt` separately.
 - **`recipes-bsp/u-boot/u-boot-<vendor>_git.bb`** — only if the board needs
   a vendor-forked bootloader source tree distinct from `u-boot-qcom`.
 
@@ -376,6 +552,20 @@ git add recipes-bsp/partition/qcom-ptool.inc
 git commit -s -m "recipes-bsp/partition: point qcom-ptool at merged <machine> partitions"
 ```
 
+## 9a. Autopilot outstanding-items summary
+
+If `DISTRO_AUTOPILOT` was set (Section 0) and any `TODO_FILL_IN_...`
+placeholder was written during the run (Sections 2/5/6/7), stop here and
+print a single consolidated list before moving to validation: one line per
+placeholder, giving the file it's in and the variable/field name (e.g.
+`firmware-qcom-boot-<board>_00036.bb: SRC_URI[bootbinaries.sha256sum] =
+TODO_FILL_IN_BOOTBINARIES_SHA256SUM`). This is the one point in an
+autopilot run where these gaps surface — do not also raise them earlier
+mid-run, and do not silently drop them. If nothing was left as a
+placeholder, skip this step. When autopilot was not used, this step is a
+no-op (any missing field was already resolved interactively as each
+section needed it).
+
 ## 10. Validate: trigger a real build
 
 Per each layer's `AGENTS.md`, before considering this done, run an actual
@@ -383,10 +573,10 @@ build — do not skip it or treat it as merely a parse check:
 
 ```sh
 export KAS_YAMLS="ci/<machine>.yml:ci/qcom-distro.yml"
-"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}" --target qcom-multimedia-image
+"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}" --target qcom-console-image
 ```
 
-The explicit `--target qcom-multimedia-image` restricts the build to that
+The explicit `--target qcom-console-image` restricts the build to that
 one image instead of the full `ci/qcom-distro.yml` target list
 (`qcom-multimedia-image`, `qcom-multimedia-proprietary-image`,
 `qcom-container-orchestration-image`, `qcom-networking-image`) — the same
@@ -434,10 +624,47 @@ opening or updating a pull request.
 **Only reachable after Section 10's build succeeded** — do not commit or
 open/update a PR off a failed or skipped build.
 
-Commit following the layer's `CONTRIBUTING.md`/`AGENTS.md`: subject
-`conf/machine: add <machine>` (or `recipes-bsp/<recipe>: add <machine>` for
-a recipe-only commit — keep each logical change atomic and in its own
-commit), plain-English body explaining what board this is and why, and a
+Commit following the layer's `CONTRIBUTING.md`/`AGENTS.md`: split the
+change into logically separate, independently buildable commits rather
+than one bundled commit — this mirrors the "avoid mixing unrelated
+changes" / "each patch must be logically coherent, self-contained, and
+independently buildable" rule in the target layer's `AGENTS.md`/
+`CONTRIBUTING.md`. A typical new-machine change decomposes along the
+recipe boundaries introduced in Sections 4-8, in dependency order so the
+tree stays buildable after every commit even though the machine only
+becomes selectable once the final commit lands:
+
+1. **New SoC plumbing** (only when Section 6 ran) — the new
+   `conf/machine/include/qcom-<soc>.inc` plus its
+   `packagegroup-machine-essential-qcom-<soc>-soc` entry in
+   `recipes-bsp/packagegroups/packagegroup-machine-essential.bb`. Subject:
+   `conf/machine: add <soc> SoC family`.
+2. **Boot/CDT firmware recipes** (Sections 4/7) — the
+   `firmware-qcom-boot-<soc-or-board>.inc`/`.bb` and
+   `firmware-qcom-cdt-<soc-or-board>.bb` pair. Subject:
+   `recipes-bsp/firmware-boot: add <soc-or-board> boot and CDT firmware recipes`.
+3. **Board packagegroup** (Sections 4/7) — the `packagegroup-<board>.bb`
+   recipe. Subject: `recipes-bsp/packagegroups: add packagegroup-<board>`.
+4. **The machine itself** — `conf/machine/<machine>.conf`, its
+   `FIT_DTB_COMPATIBLE` entries (Section 5) in
+   `conf/machine/include/fit-dtb-compatible.inc`, and `ci/<machine>.yml`
+   (Section 8). This is the commit that wires everything above together
+   and is the point at which the machine becomes selectable/buildable, so
+   it must land last. Subject: `conf/machine: add <machine>`.
+
+Commits 1-3 add recipes nothing references yet, so they don't change any
+existing machine's behavior — safe to land independently of each other,
+but all three must precede commit 4. Skip a slot here the same way its
+corresponding write step was skipped (no new SoC → no commit 1; board
+reuses an existing packagegroup pattern instead of a new one → fold into
+commit 4 rather than inventing a split that isn't there). For a small/
+simple addition (existing SoC, no new firmware, no new packagegroup), it
+is fine to collapse to a single `conf/machine: add <machine>` commit —
+logical separation means matching commit boundaries to genuinely distinct
+pieces of work, not hitting a fixed commit count.
+
+For each commit: `git add` only the files for that piece, plain-English
+body explaining what and why for anything non-trivial, and a
 `Signed-off-by` trailer built from `git config user.name`/`user.email` —
 never fabricate identity. Add `Assisted-by: AGENT_NAME:MODEL_VERSION` if an
 AI assistant helped write the change.
@@ -446,10 +673,18 @@ AI assistant helped write the change.
 cd <layer-checkout>
 git fetch origin <layer-default-branch>
 git checkout -b add/<machine> origin/<layer-default-branch>
-git add <files for this logical change>
-git commit -s -m "conf/machine: add <machine>"
+# repeat per commit in the split above:
+git add <files for this commit>
+git status   # confirm nothing unrelated got swept in
+git commit -s -m "<subject for this commit>"
 git push origin add/<machine>
 ```
+
+Never `git commit --amend` or otherwise rewrite a commit already made in
+this series to fix a mistake — fix it in a new commit ahead of the same
+push, per `AGENTS.md`'s "fixups within the same patch series are not
+allowed" rule (where that rule exists; otherwise still prefer a new commit
+over rewriting one already pushed).
 
 - `<layer-default-branch>` is `master` for meta-qcom, `main` for
   meta-qcom-3rdparty (see Notes).
@@ -555,7 +790,7 @@ changes: []
 workspace:    "<local meta-qcom/meta-qcom-3rdparty checkout path used>"
 machine:      "<machine>"
 distro:       "qcom-distro"
-image:        "qcom-multimedia-image"
+image:        "<image built in Section 10, e.g. qcom-console-image>"
 build_config: "<KAS_YAMLS value used>"
 ```
 
