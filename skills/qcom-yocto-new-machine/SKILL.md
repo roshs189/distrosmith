@@ -54,22 +54,27 @@ env vars below and clones the repos this skill needs.
   ```sh
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
   ```
-- **`BUILD_DISTRO_ROOT`** (optional, defaults to `/tmp/distrosmith-repos`)
-  — the local root directory under which layer checkouts live:
-  `${BUILD_DISTRO_ROOT:-/tmp/distrosmith-repos}/meta-qcom` and, if the
+- **`BUILD_DISTRO_ROOT`** (optional, defaults to
+  `$(pwd)/.distrosmith-work` — a work directory under the invocation cwd,
+  not `/tmp`) — the local root directory under which layer checkouts live:
+  `${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}/meta-qcom` and, if the
   target layer is meta-qcom-3rdparty,
-  `${BUILD_DISTRO_ROOT:-/tmp/distrosmith-repos}/meta-qcom-3rdparty`. If a
+  `${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}/meta-qcom-3rdparty`. If a
   checkout already exists at that path, use it as-is. If it doesn't exist
   yet, clone the user's own fork over HTTPS using the token (no SSH key
   needed):
   ```sh
-  git clone "https://$GITHUB_TOKEN@github.com/$DISTRO_GITHUB_ORG/meta-qcom.git" "${BUILD_DISTRO_ROOT:-/tmp/distrosmith-repos}/meta-qcom"
+  git clone "https://$GITHUB_TOKEN@github.com/$DISTRO_GITHUB_ORG/meta-qcom.git" "${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}/meta-qcom"
   ```
   (substitute `meta-qcom-3rdparty` as needed). Only ask the user for a
   different path if they say their checkout lives somewhere else — don't
   default to cloning upstream `qualcomm-linux/meta-qcom` when no local
   checkout is given; this skill always targets the user's own fork so
-  Section 11's automated PR has somewhere to push to.
+  Section 11's automated PR has somewhere to push to. When this skill runs
+  standalone (not via `distro-smith`), leave this checkout in place when
+  done — it's reused by follow-up work (see Notes); only `distro-smith`'s
+  own orchestration removes it, and only after that flow's
+  `distro-params.yaml` is written.
 
 ## 1. Pick the target layer
 
@@ -389,11 +394,31 @@ one image instead of the full `ci/qcom-distro.yml` target list
 (`.github/workflows/compile.yml`).
 
 Record the actual build result (pass/fail; on failure, the tail of the
-build log) — **this result gates Section 11 next.** If the build fails,
-stop here: do not attempt to fix it automatically (that's explicitly out
-of scope for this skill) and do not proceed to Section 11 — go straight to
-Section 12 to report the failure and write `distro-params.yaml` with
-`status: "fail"`.
+build log) — **this result gates Section 11 next.**
+
+If the build fails, diagnose the actual error from the log (bitbake's
+`ERROR:` lines usually name the missing/broken recipe or dependency
+directly) and attempt a fix:
+
+- Prefer the smallest change that addresses the real cause — e.g. drop an
+  RDEPENDS/RRECOMMENDS on a package that genuinely doesn't exist upstream
+  yet, correct a typo'd recipe/package name, add a missing `require`, fix
+  a bad `SRC_URI`/`SRCREV`/checksum. Don't paper over the error by deleting
+  functionality beyond the specific broken reference.
+- Re-run the exact same build command after each fix attempt.
+- Cap retries at 3 distinct fix attempts. If the build still fails after
+  3 attempts, or if the root cause isn't something this skill's own
+  written files control (e.g. an upstream repo genuinely missing a
+  package, a network/infra failure, a disk-space error), stop — do not
+  keep iterating blindly. Go to Section 12 to report the failure (include
+  what was tried and why it didn't resolve it) and write
+  `distro-params.yaml` with `status: "fail"`.
+- Any fix applied here becomes part of the same commit(s) in Section 11 —
+  don't create separate "fixup" commits; the change that goes into the PR
+  should look like it was written correctly the first time.
+
+Once the build passes (whether on the first attempt or after a fix),
+continue below.
 
 If the build succeeds, continue:
 
@@ -548,8 +573,9 @@ is empty since nothing was committed or opened.
   layers add only board-unique ones and depend on meta-qcom for the rest.
 - Never guess `DISTRO_GITHUB_ORG` — if it's unset, stop and ask. A wrong
   org silently pushes a branch and opens a PR against someone else's repo.
-- Never attempt to automatically fix a failed build (Section 10) — report
-  the failure and stop; that capability is explicitly out of scope here.
+- On a failed build (Section 10), attempt a fix (capped at 3 attempts)
+  before reporting failure — see Section 10 for the diagnose/fix/retry
+  loop and its limits.
 - For subsequent work on the new machine, follow up with
   `qcom-yocto-build-image` (build), `qcom-flash-qdl`/`qcom-boot-validate`
   (flash and validate on hardware), and `qcom-yocto-pre-pr-checks` before

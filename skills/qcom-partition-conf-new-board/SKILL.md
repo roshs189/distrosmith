@@ -71,19 +71,24 @@ env vars below and clones the repos this skill needs.
   ```
   A `login` field in the response confirms the token works before you rely
   on it later.
-- **`BUILD_DISTRO_ROOT`** (optional, defaults to `/tmp/distrosmith-repos`)
-  — the local root directory under which the qcom-ptool checkout lives:
-  `${BUILD_DISTRO_ROOT:-/tmp/distrosmith-repos}/qcom-ptool`. This keeps
-  `distrosmith`-managed clones separate from any other qcom-ptool checkout
-  the user already has elsewhere. If a checkout already exists at that
-  path, use it as-is; only ask the user for a different path if they say
-  their checkout lives somewhere else.
+- **`BUILD_DISTRO_ROOT`** (optional, defaults to
+  `$(pwd)/.distrosmith-work` — a work directory under the invocation cwd,
+  not `/tmp`) — the local root directory under which the qcom-ptool
+  checkout lives: `${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}/qcom-ptool`.
+  This keeps `distrosmith`-managed clones separate from any other
+  qcom-ptool checkout the user already has elsewhere. If a checkout
+  already exists at that path, use it as-is; only ask the user for a
+  different path if they say their checkout lives somewhere else. When
+  this skill runs standalone (not via `distro-smith`), leave this checkout
+  in place when done — it's reused by follow-up work (see Notes); only
+  `distro-smith`'s own orchestration removes it, and only after that
+  flow's `distro-params.yaml` is written.
 - The local `qcom-ptool` checkout's `origin` remote must be
   `$QCOM_PTOOL_TARGET` (the fork the PR gets opened against), not the
   upstream `qualcomm-linux/qcom-ptool`. If cloning fresh, clone the fork
   over HTTPS using the token (no SSH key needed):
   ```sh
-  git clone "https://$GITHUB_TOKEN@github.com/$QCOM_PTOOL_TARGET.git" "${BUILD_DISTRO_ROOT:-/tmp/distrosmith-repos}/qcom-ptool"
+  git clone "https://$GITHUB_TOKEN@github.com/$QCOM_PTOOL_TARGET.git" "${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}/qcom-ptool"
   ```
   If an existing checkout's `origin` points somewhere else (upstream, or a
   different org than `$DISTRO_GITHUB_ORG`), either re-point it
@@ -135,7 +140,7 @@ Metadata" sections used to:
    the old **contents.xml.in Metadata** table.
 
 The local `qcom-ptool` clone location defaults per Section 0
-(`${BUILD_DISTRO_ROOT:-/tmp/distrosmith-repos}/qcom-ptool`) — only ask the
+(`${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}/qcom-ptool`) — only ask the
 user if they've indicated their checkout lives elsewhere. Also ask (don't
 guess) the machine name to use for the new branch/PR if it differs from
 the board-spec `machine` name (default: same name).

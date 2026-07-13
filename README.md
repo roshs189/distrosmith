@@ -43,7 +43,7 @@ is configurable; repo names are always `meta-qcom`, `qcom-ptool`,
 |---|---|---|
 | `DISTRO_GITHUB_ORG` | **Yes** | GitHub org/user hosting your forks of all four repos above. Never guessed — all three skills stop and ask if it's unset. |
 | `GITHUB_TOKEN` | **Yes** | A GitHub PAT used for *both* git operations (HTTPS clone/push) and GitHub REST API calls (PR creation). Classic PAT with `repo` scope, or fine-grained with `Contents: Read and write` + `Pull requests: Read and write` on the relevant repos. **No SSH key is used anywhere in this bundle.** |
-| `BUILD_DISTRO_ROOT` | No (default `/tmp/distrosmith-repos`) | Local root under which the four repos get cloned, kept separate from any other checkouts you already have. |
+| `BUILD_DISTRO_ROOT` | No (default `$(pwd)/.distrosmith-work`, a work directory under the invocation cwd) | Local root under which the four repos get cloned, kept separate from any other checkouts you already have. `distro-smith` removes this directory once `distro-params.yaml` is written, but only on a successful run — a failed run's checkout is left in place for debugging. |
 
 Generate a token at https://github.com/settings/tokens if you don't have
 one. Never commit it or paste it into a chat — `setup.py` only ever reads
