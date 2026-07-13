@@ -764,7 +764,7 @@ changes:
 workspace:    "<local meta-qcom/meta-qcom-3rdparty checkout path used>"
 machine:      "<machine>"
 distro:       "qcom-distro"
-image:        "qcom-multimedia-image"
+image:        "<image built in Section 10, e.g. qcom-console-image>"
 build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/qcom-distro.yml>"
 ```
 
@@ -774,7 +774,9 @@ build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/qcom-distro.yml>"
 - If invoked standalone (no Section 9 SRCREV-bump leg this run), omit the
   first `changes` entry — only list what this run itself produced.
 - `workspace`/`machine`/`distro`/`image`/`build_config` are filled with
-  the actual values already known at this point, not left blank.
+  the actual values already known at this point, not left blank. `image`
+  must match the actual `--target` Section 10 built, not always the
+  sample value shown here.
 
 On a failed build (Section 10 stopped things short):
 

@@ -3,11 +3,12 @@ name: distro-smith
 description: >-
   End-to-end distro bring-up for a board: generate and merge its
   qcom-ptool partition files, bump meta-qcom's qcom-ptool.inc SRCREV to
-  that merged commit, trigger a real kas-container build targeting
-  qcom-multimedia-image (attempting a fix and retry if it fails), and —
-  only once the build succeeds — commit and open the meta-qcom PR. Always
-  writes the run's result to distro-params.yaml, and on a successful run
-  cleans up its own clone work directory once that file is written
+  that merged commit, trigger a real kas-container build (whatever image
+  qcom-yocto-new-machine's Section 10 targets, attempting a fix and retry
+  if it fails), and — only once the build succeeds — commit and open the
+  meta-qcom PR. Always writes the run's result to distro-params.yaml, and
+  on a successful run cleans up its own clone work directory once that
+  file is written
   (failed runs keep the work directory for debugging). Stitches together
   qcom-partition-conf-new-board and qcom-yocto-new-machine into one
   invocation. Use for "run the build distro skill for <machine>", "do the
@@ -70,8 +71,9 @@ meta-qcom), then:
 
 - Its Section 9 (bump `qcom-ptool.inc`'s `SRCREV`), passing the merge
   commit SHA captured in step 1.
-- Its Section 10 (real build, `--target qcom-multimedia-image`, including
-  its diagnose/fix/retry loop on failure).
+- Its Section 10 (real build, including its diagnose/fix/retry loop on
+  failure — the `--target` is that skill's own default, not this
+  orchestrator's decision to restate).
 
 If the build still fails after that skill's retry cap is exhausted, its
 own gate stops it before committing or opening a PR — do not override
