@@ -14,7 +14,7 @@ import venv
 from pathlib import Path
 
 REPO_NAMES = ["meta-qcom", "qcom-ptool", "board-spec", "board-spec-mcp"]
-DEFAULT_REPO_ROOT = "/tmp/distrosmith-repos"
+DEFAULT_REPO_ROOT = str(Path.cwd() / ".distrosmith-work")
 ENV_FILE = Path.home() / ".distrosmith" / "env"
 SKILLS_SRC = Path(__file__).resolve().parent / "skills"
 SKILLS_DEST = Path.home() / ".claude" / "skills"
