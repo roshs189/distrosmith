@@ -372,8 +372,8 @@ curl -s -X PUT \
   PR.
 - A `200` response with `"merged": true` means success — capture the
   response's `sha` (the merge commit SHA). This is the exact commit a
-  caller (e.g. the `distro-smith` orchestrator, or `qcom-yocto-new-machine`
-  bumping `qcom-ptool.inc`'s `SRCREV`) should point at next. Report the PR
+  caller (e.g. the `distro-smith` orchestrator) bumping
+  `qcom-ptool.inc`'s `SRCREV` should point at next. Report the PR
   URL and this merge commit SHA back to the user/caller.
 - A `405` (not mergeable) or `409` (SHA mismatch/race) — report the API's
   `message` rather than retrying blindly.
@@ -395,9 +395,9 @@ which `<subdir>` to copy `gpt_*.bin`/`rawprogram*.xml`/`patch*.xml`/
 This skill gets you through "these files exist, validated inside a
 qcom-ptool checkout, and are merged into the fork." Getting them into an
 actual `qcomflash` build output additionally requires, as separate
-follow-up work — automated by `qcom-yocto-new-machine`/`distro-smith` for
-items 2-4 below, but confirm with the user first if running standalone,
-since it touches what gets built:
+follow-up work — automated by `distro-smith` for items 2-4 below, but
+confirm with the user first if running standalone, since it touches what
+gets built:
 
 1. Merging the fork PR (Section 6, now automatic) upstream into
    `qualcomm-linux/qcom-ptool` (its own PR against `main`, per
@@ -407,9 +407,10 @@ since it touches what gets built:
    a staging step, not the final upstream contribution, unless the user's
    workflow treats the fork as authoritative. This step remains manual.
 2. Bumping `SRCREV` in `meta-qcom`'s `recipes-bsp/partition/qcom-ptool.inc`
-   to the fork merge commit from Section 6 — `qcom-yocto-new-machine`
-   does this automatically when given that commit SHA (e.g. via the
-   `distro-smith` orchestrator).
+   to the fork merge commit from Section 6 — the `distro-smith`
+   orchestrator does this automatically when given that commit SHA (see
+   that skill's own SKILL.md); `qcom-yocto-new-machine` itself no longer
+   performs this step.
 3. Setting `QCOM_PARTITION_FILES_SUBDIR ?= "partitions/<machine>/<storage>"`
    (and `QCOM_PARTITION_FILES_SUBDIR_SPINOR` if applicable) in the
    machine's `.conf` — this is `qcom-yocto-new-machine`'s territory.

@@ -10,8 +10,9 @@ hardcoded org, repo path, or SSH key required.
 - **`qcom-yocto-new-machine`** — bring up a new machine (board) in a Yocto
   BSP layer: `conf/machine/<machine>.conf`, matching `ci/<machine>.yml`, a
   new per-SoC include when needed, and (for third-party boards) the
-  firmware-boot/packagegroup/u-boot recipes a board needs. Also commits
-  the change and opens a PR against your fork automatically.
+  firmware-boot/packagegroup/u-boot recipes a board needs. Runs a single
+  real `kas-container` build to validate the result but does not retry a
+  failure, commit, or open a PR itself — see `distro-smith` for that.
 - **`qcom-partition-conf-new-board`** — generate `qcom-ptool`'s
   `partitions.conf` and `contents.xml.in` for a new board, validate them by
   running `qcom-ptool` locally to produce flashable artifacts, then

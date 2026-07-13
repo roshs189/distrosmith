@@ -10,18 +10,18 @@ description: >-
   board, kernel devicetree, boot/partition subdirs, etc.) are pulled from
   the board-spec MCP server (the board-spec repo — see Section 0) when a
   spec already exists for the machine, falling back to asking the user for
-  genuinely new boards. Optionally bumps recipes-bsp/partition/
-  qcom-ptool.inc's SRCREV to a merged qcom-ptool commit (see Section 9),
-  then triggers a real kas-container build targeting qcom-console-image
-  (Section 10) — commits and opens a PR against the configured fork
-  (`$DISTRO_GITHUB_ORG/meta-qcom` or `$DISTRO_GITHUB_ORG/meta-qcom-3rdparty`
-  — see Section 0) via the GitHub REST API only if that build succeeds, and
-  always writes the run's result to distro-params.yaml (Section 12). Use
-  when asked to "add a new machine/board to meta-qcom", "bring up <board>
-  in meta-qcom-3rdparty", "create a machine conf for <SoC>", or "add CI yml
+  genuinely new boards. Triggers a single real kas-container build
+  targeting qcom-console-image (Section 10) to validate the result, and
+  reports pass/fail back to the caller. Does NOT bump qcom-ptool.inc's
+  SRCREV, retry a failed build, open a PR, or write distro-params.yaml —
+  those are the `distro-smith` orchestrator's job (see that skill's
+  SKILL.md) when this skill is run as part of the combined flow. Use when
+  asked to "add a new machine/board to meta-qcom", "bring up <board> in
+  meta-qcom-3rdparty", "create a machine conf for <SoC>", or "add CI yml
   for a new board". Do NOT use for flashing/validating hardware (see
-  qcom-flash-qdl, qcom-boot-validate), or running pre-PR checks on an
-  already-written change (see qcom-yocto-pre-pr-checks).
+  qcom-flash-qdl, qcom-boot-validate), running pre-PR checks on an
+  already-written change (see qcom-yocto-pre-pr-checks), or the full
+  build-retry-PR flow (see distro-smith).
 ---
 
 # Bring up a new machine in a Qualcomm Yocto BSP layer
@@ -43,14 +43,12 @@ env vars below and clones the repos this skill needs.
   `distrosmith`-managed forks (`meta-qcom`, `meta-qcom-3rdparty` if used,
   `board-spec`, `board-spec-mcp`), always under those exact repo names. If
   it's unset, stop and ask the user for it rather than guessing — this
-  value determines whose repo gets a branch pushed and a PR opened
-  against it (see Section 11).
+  value determines whose fork this skill clones and builds against.
 - **`GITHUB_TOKEN`** must be exported in the shell environment (a GitHub
   PAT — classic with `repo` scope, or fine-grained with `Contents:
-  Read and write` + `Pull requests: Read and write` on the target
-  layer repo). Covers both git push/fetch (over HTTPS) and the GitHub
-  REST API PR-creation call in Section 11 — no SSH key is used anywhere in
-  this skill.
+  Read and write` on the target layer repo). Covers git clone/fetch over
+  HTTPS for the checkout below — no SSH key is used anywhere in this
+  skill.
   ```sh
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
   ```
@@ -69,12 +67,12 @@ env vars below and clones the repos this skill needs.
   (substitute `meta-qcom-3rdparty` as needed). Only ask the user for a
   different path if they say their checkout lives somewhere else — don't
   default to cloning upstream `qualcomm-linux/meta-qcom` when no local
-  checkout is given; this skill always targets the user's own fork so
-  Section 11's automated PR has somewhere to push to. When this skill runs
-  standalone (not via `distro-smith`), leave this checkout in place when
-  done — it's reused by follow-up work (see Notes); only `distro-smith`'s
-  own orchestration removes it, and only after that flow's
-  `distro-params.yaml` is written.
+  checkout is given; this skill always targets the user's own fork, since
+  a commit/PR step run afterward (by `distro-smith`, or manually) needs
+  somewhere to push to. This skill itself never removes this checkout —
+  leave it in place when done; only `distro-smith`'s own orchestration
+  removes it, and only after that flow's own `distro-params.yaml` is
+  written.
 - **`DISTRO_AUTOPILOT`** (optional, defaults to unset/false) — set it (or
   have the user ask to run this "non-interactively" / "just fill in
   placeholders for anything missing") to switch to **autopilot**: never
@@ -525,34 +523,7 @@ meta-qcom-3rdparty additionally pins the meta-qcom dependency
 `ci/uno-q.yml` or `ci/radxa-dragon-q6a.yml`, which include `ci/base.yml`
 (itself pulling in `ci/meta-qcom.yml`) the same way.
 
-## 9. New qcom-ptool commit only: bump `qcom-ptool.inc`'s `SRCREV`
-
-Skip this step entirely unless you were given a qcom-ptool commit SHA to
-point at — typically the merge commit SHA that `qcom-partition-conf-new-board`
-reports after Section 6's auto-merge (e.g. when invoked via the
-`distro-smith` orchestrator). This is not something to do speculatively
-when this skill is invoked standalone with no such SHA.
-
-If the layer has `recipes-bsp/partition/qcom-ptool.inc` and you do have a
-target SHA:
-
-```sh
-sed -i \
-  -e "s#^SRC_URI = .*#SRC_URI = \"git://github.com/\$DISTRO_GITHUB_ORG/qcom-ptool.git;branch=main;protocol=https\"#" \
-  -e "s#^SRCREV = .*#SRCREV = \"<merged-commit-sha>\"#" \
-  recipes-bsp/partition/qcom-ptool.inc
-```
-
-This is its own atomic commit, separate from the `conf/machine: add
-<machine>` commit (per `AGENTS.md`'s "each patch must be logically
-coherent, self-contained" rule):
-
-```sh
-git add recipes-bsp/partition/qcom-ptool.inc
-git commit -s -m "recipes-bsp/partition: point qcom-ptool at merged <machine> partitions"
-```
-
-## 9a. Autopilot outstanding-items summary
+## 9. Autopilot outstanding-items summary
 
 If `DISTRO_AUTOPILOT` was set (Section 0) and any `TODO_FILL_IN_...`
 placeholder was written during the run (Sections 2/5/6/7), stop here and
@@ -583,32 +554,14 @@ one image instead of the full `ci/qcom-distro.yml` target list
 `--target` override CI already uses for its SDK build step
 (`.github/workflows/compile.yml`).
 
-Record the actual build result (pass/fail; on failure, the tail of the
-build log) — **this result gates Section 11 next.**
-
-If the build fails, diagnose the actual error from the log (bitbake's
-`ERROR:` lines usually name the missing/broken recipe or dependency
-directly) and attempt a fix:
-
-- Prefer the smallest change that addresses the real cause — e.g. drop an
-  RDEPENDS/RRECOMMENDS on a package that genuinely doesn't exist upstream
-  yet, correct a typo'd recipe/package name, add a missing `require`, fix
-  a bad `SRC_URI`/`SRCREV`/checksum. Don't paper over the error by deleting
-  functionality beyond the specific broken reference.
-- Re-run the exact same build command after each fix attempt.
-- Cap retries at 3 distinct fix attempts. If the build still fails after
-  3 attempts, or if the root cause isn't something this skill's own
-  written files control (e.g. an upstream repo genuinely missing a
-  package, a network/infra failure, a disk-space error), stop — do not
-  keep iterating blindly. Go to Section 12 to report the failure (include
-  what was tried and why it didn't resolve it) and write
-  `distro-params.yaml` with `status: "fail"`.
-- Any fix applied here becomes part of the same commit(s) in Section 11 —
-  don't create separate "fixup" commits; the change that goes into the PR
-  should look like it was written correctly the first time.
-
-Once the build passes (whether on the first attempt or after a fix),
-continue below.
+Report the actual build result back to the caller (the user, or
+`distro-smith` when invoked as part of that orchestration): pass/fail, and
+on failure the tail of the build log. This skill does not retry a failed
+build, diagnose the failure, commit, or open a PR itself — a single build
+attempt is the full extent of this step. Retrying with a fix, committing,
+and opening a PR are `distro-smith`'s responsibility when this skill runs
+as part of that flow; when this skill runs standalone, that follow-up work
+is the user's to do by hand or by invoking `distro-smith` next.
 
 If the build succeeds, continue:
 
@@ -618,187 +571,6 @@ ci/kas-container-shell-helper.sh ci/yocto-patchreview.sh
 
 Run `ci/kas-container-shell-helper.sh ci/yocto-check-layer.sh` before
 opening or updating a pull request.
-
-## 11. Commit and open the PR
-
-**Only reachable after Section 10's build succeeded** — do not commit or
-open/update a PR off a failed or skipped build.
-
-Commit following the layer's `CONTRIBUTING.md`/`AGENTS.md`: split the
-change into logically separate, independently buildable commits rather
-than one bundled commit — this mirrors the "avoid mixing unrelated
-changes" / "each patch must be logically coherent, self-contained, and
-independently buildable" rule in the target layer's `AGENTS.md`/
-`CONTRIBUTING.md`. A typical new-machine change decomposes along the
-recipe boundaries introduced in Sections 4-8, in dependency order so the
-tree stays buildable after every commit even though the machine only
-becomes selectable once the final commit lands:
-
-1. **New SoC plumbing** (only when Section 6 ran) — the new
-   `conf/machine/include/qcom-<soc>.inc` plus its
-   `packagegroup-machine-essential-qcom-<soc>-soc` entry in
-   `recipes-bsp/packagegroups/packagegroup-machine-essential.bb`. Subject:
-   `conf/machine: add <soc> SoC family`.
-2. **Boot/CDT firmware recipes** (Sections 4/7) — the
-   `firmware-qcom-boot-<soc-or-board>.inc`/`.bb` and
-   `firmware-qcom-cdt-<soc-or-board>.bb` pair. Subject:
-   `recipes-bsp/firmware-boot: add <soc-or-board> boot and CDT firmware recipes`.
-3. **Board packagegroup** (Sections 4/7) — the `packagegroup-<board>.bb`
-   recipe. Subject: `recipes-bsp/packagegroups: add packagegroup-<board>`.
-4. **The machine itself** — `conf/machine/<machine>.conf`, its
-   `FIT_DTB_COMPATIBLE` entries (Section 5) in
-   `conf/machine/include/fit-dtb-compatible.inc`, and `ci/<machine>.yml`
-   (Section 8). This is the commit that wires everything above together
-   and is the point at which the machine becomes selectable/buildable, so
-   it must land last. Subject: `conf/machine: add <machine>`.
-
-Commits 1-3 add recipes nothing references yet, so they don't change any
-existing machine's behavior — safe to land independently of each other,
-but all three must precede commit 4. Skip a slot here the same way its
-corresponding write step was skipped (no new SoC → no commit 1; board
-reuses an existing packagegroup pattern instead of a new one → fold into
-commit 4 rather than inventing a split that isn't there). For a small/
-simple addition (existing SoC, no new firmware, no new packagegroup), it
-is fine to collapse to a single `conf/machine: add <machine>` commit —
-logical separation means matching commit boundaries to genuinely distinct
-pieces of work, not hitting a fixed commit count.
-
-For each commit: `git add` only the files for that piece, plain-English
-body explaining what and why for anything non-trivial, and a
-`Signed-off-by` trailer built from `git config user.name`/`user.email` —
-never fabricate identity. Add `Assisted-by: AGENT_NAME:MODEL_VERSION` if an
-AI assistant helped write the change.
-
-```sh
-cd <layer-checkout>
-git fetch origin <layer-default-branch>
-git checkout -b add/<machine> origin/<layer-default-branch>
-# repeat per commit in the split above:
-git add <files for this commit>
-git status   # confirm nothing unrelated got swept in
-git commit -s -m "<subject for this commit>"
-git push origin add/<machine>
-```
-
-Never `git commit --amend` or otherwise rewrite a commit already made in
-this series to fix a mistake — fix it in a new commit ahead of the same
-push, per `AGENTS.md`'s "fixups within the same patch series are not
-allowed" rule (where that rule exists; otherwise still prefer a new commit
-over rewriting one already pushed).
-
-- `<layer-default-branch>` is `master` for meta-qcom, `main` for
-  meta-qcom-3rdparty (see Notes).
-- Branch name is always `add/<machine>`. If it already exists on `origin`
-  (e.g. a prior run for this board), stop and ask the user whether to
-  force-push an update or pick a different branch name — never force-push
-  silently.
-- Before pushing, check whether a PR already exists for this branch to
-  avoid opening a duplicate:
-  ```sh
-  curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$DISTRO_GITHUB_ORG/<repo>/pulls?head=$DISTRO_GITHUB_ORG:add/<machine>&state=open"
-  ```
-  A non-empty array means one's already open — report its `html_url` back
-  to the user instead of creating a second one.
-
-Then open the PR against `$DISTRO_GITHUB_ORG/<repo>`'s default branch via
-the GitHub REST API (no `gh` CLI or browser step needed):
-
-```sh
-curl -s -X POST \
-  -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/$DISTRO_GITHUB_ORG/<repo>/pulls" \
-  -d @- <<EOF
-{
-  "title": "conf/machine: add <machine>",
-  "head": "add/<machine>",
-  "base": "<layer-default-branch>",
-  "body": "Adds <machine> (<SoC>) via the qcom-yocto-new-machine skill.\n\nValidated locally with kas-container build, yocto-patchreview.sh, and yocto-check-layer.sh.",
-  "draft": false
-}
-EOF
-```
-
-- A `201` response with an `html_url` field means the PR was created —
-  report that URL back to the user.
-- A `422` usually means the branch has no diff against `base` (nothing to
-  PR) or a PR already exists — read the `message`/`errors` fields and
-  surface them rather than retrying blindly.
-- If `GITHUB_TOKEN` is missing/invalid (`401`), stop and tell the user to
-  re-check Section 0's prerequisite — don't fall back to printing a manual
-  "go create this PR yourself" message as a silent default.
-- This PR lands on the user's own fork first (a staging step, same
-  philosophy as `qcom-partition-conf-new-board`) — merging it upstream into
-  `qualcomm-linux/meta-qcom` (or the 3rdparty layer's upstream) is a
-  separate, manual follow-up; don't do that without the user asking.
-
-## 12. Write `distro-params.yaml`
-
-Always write this file, whether Section 10's build passed or failed —
-write it in the directory this skill was invoked from (the invocation
-cwd, not the `BUILD_DISTRO_ROOT` checkout).
-
-On a successful build + PR (Section 11 ran):
-
-```yaml
-status: "pass"
-
-repo:        "https://github.com/$DISTRO_GITHUB_ORG/<repo>.git"
-branch:      "add/<machine>"
-type:        "distro"
-
-changes:
-  - type: pr
-    url: <qcom-ptool PR html_url, only if Section 9 ran this invocation>
-  - type: pr
-    url: <meta-qcom PR html_url from Section 11>
-  # Add more changes below (applied in listed order):
-  # - type: pr
-  #   url: https://github.com/qualcomm-linux/meta-qcom/pull/2717
-  # - type: commit
-  #   url: https://github.com/qualcomm-linux/meta-qcom/commit/abc1234
-  # - type: patch
-  #   path: /home/user/fixes/fix-audio.patch
-
-workspace:    "<local meta-qcom/meta-qcom-3rdparty checkout path used>"
-machine:      "<machine>"
-distro:       "qcom-distro"
-image:        "<image built in Section 10, e.g. qcom-console-image>"
-build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/qcom-distro.yml>"
-```
-
-- List every PR/commit the whole chain produced, in the order they were
-  applied (qcom-ptool merge first if this run included Section 9, then
-  the meta-qcom PR) — not just this skill's own PR.
-- If invoked standalone (no Section 9 SRCREV-bump leg this run), omit the
-  first `changes` entry — only list what this run itself produced.
-- `workspace`/`machine`/`distro`/`image`/`build_config` are filled with
-  the actual values already known at this point, not left blank. `image`
-  must match the actual `--target` Section 10 built, not always the
-  sample value shown here.
-
-On a failed build (Section 10 stopped things short):
-
-```yaml
-status: "fail"
-
-repo:        "https://github.com/$DISTRO_GITHUB_ORG/<repo>.git"
-branch:      "add/<machine>"
-type:        "distro"
-
-changes: []
-
-workspace:    "<local meta-qcom/meta-qcom-3rdparty checkout path used>"
-machine:      "<machine>"
-distro:       "qcom-distro"
-image:        "<image built in Section 10, e.g. qcom-console-image>"
-build_config: "<KAS_YAMLS value used>"
-```
-
-`machine`/`distro`/`image`/`build_config` stay filled in even on failure —
-those are known regardless of whether the build succeeded; only `changes`
-is empty since nothing was committed or opened.
 
 ## Notes
 
@@ -810,9 +582,6 @@ is empty since nothing was committed or opened.
   layers add only board-unique ones and depend on meta-qcom for the rest.
 - Never guess `DISTRO_GITHUB_ORG` — if it's unset, stop and ask. A wrong
   org silently pushes a branch and opens a PR against someone else's repo.
-- On a failed build (Section 10), attempt a fix (capped at 3 attempts)
-  before reporting failure — see Section 10 for the diagnose/fix/retry
-  loop and its limits.
 - For subsequent work on the new machine, follow up with
   `qcom-yocto-build-image` (build), `qcom-flash-qdl`/`qcom-boot-validate`
   (flash and validate on hardware), and `qcom-yocto-pre-pr-checks` before
