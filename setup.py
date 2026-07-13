@@ -28,8 +28,6 @@ def parse_args():
                     help=f"Local root to clone repos into (default: {DEFAULT_REPO_ROOT})")
     p.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"),
                     help="GitHub PAT (or set GITHUB_TOKEN); prompted for if omitted")
-    p.add_argument("--project-dir", default=os.getcwd(),
-                    help="Directory whose .mcp.json should get the board-spec server entry")
     p.add_argument("--skip-clone", action="store_true",
                     help="Skip cloning the 4 repos (useful for re-running the rest)")
     return p.parse_args()
@@ -140,8 +138,9 @@ def main():
     print("Setting up board-spec-mcp...")
     board_spec_mcp_bin = setup_board_spec_mcp(args.repo_root)
 
-    print(f"Registering board-spec MCP server in {args.project_dir}/.mcp.json...")
-    merge_mcp_json(args.project_dir, board_spec_mcp_bin)
+    project_dir = os.getcwd()
+    print(f"Registering board-spec MCP server in {project_dir}/.mcp.json...")
+    merge_mcp_json(project_dir, board_spec_mcp_bin)
 
     print(f"Installing skills into {SKILLS_DEST}...")
     install_skills()

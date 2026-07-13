@@ -54,21 +54,29 @@ or the cloned repos.
 
 ## Installing
 
+Run `setup.py` from whichever project directory you'll invoke these
+skills from — that's where the `board-spec` MCP server gets registered
+(in that directory's `.mcp.json`). The four repos themselves get cloned
+separately under `$BUILD_DISTRO_ROOT`, so the project directory doesn't
+need to be (and normally isn't) a checkout of any of them.
+
 ```sh
 git clone <this-repo> distrosmith
 cd distrosmith
 export DISTRO_GITHUB_ORG=<your-github-username-or-org>
-python3 setup.py --project-dir /path/to/your/meta-qcom-checkout
+export GITHUB_TOKEN=<your-github-pat>
+cd /path/to/your/project
+python3 /path/to/distrosmith/setup.py
 ```
 
 `setup.py` will:
 
-1. Prompt for `GITHUB_TOKEN` if not already exported, and verify it works.
+1. Verify `GITHUB_TOKEN` (prompting for it if not already exported).
 2. Clone `meta-qcom`, `qcom-ptool`, `board-spec`, `board-spec-mcp` from
    `$DISTRO_GITHUB_ORG` under `$BUILD_DISTRO_ROOT` (skipping any that
    already exist there).
 3. Create a venv for `board-spec-mcp` and `pip install -e .` it.
-4. Merge a `board-spec` MCP server entry into `--project-dir`'s
+4. Merge a `board-spec` MCP server entry into the current directory's
    `.mcp.json` (preserving any other entries already there).
 5. Copy all three skills into `~/.claude/skills/`.
 6. Write `DISTRO_GITHUB_ORG`/`BUILD_DISTRO_ROOT`/`GITHUB_TOKEN` to
