@@ -10,10 +10,10 @@ description: >-
   rawprogram*.xml, patch*.xml, contents.xml) — those generated artifacts
   are validation-only and never committed; only partitions.conf/
   contents.xml.in go in the PR. Once validated, automatically commits
-  those two files to a new `add/<machine>` branch and opens a PR against
-  the configured qcom-ptool fork (`$DISTRO_GITHUB_ORG/qcom-ptool` — see
-  Section 0) via the GitHub REST API — no manual git push or browser step
-  required. meta-qcom regenerates the real flashable artifacts at build
+  those two files to a new `add/<machine>` branch, opens a PR against the
+  configured qcom-ptool fork (`$DISTRO_GITHUB_ORG/qcom-ptool` — see
+  Section 0) via the GitHub REST API, and merges it — no manual git push,
+  browser step, or manual merge required. meta-qcom regenerates the real flashable artifacts at build
   time (see Section 7) and copies them into <image>.qcomflash/ via
   classes-recipe/image_types_qcom.bbclass's deploy_partition_files. Use
   when asked to "generate the partition files for <board>", "create
@@ -32,9 +32,9 @@ Turns a schema-validated board-spec entry (served by the `board-spec` MCP
 server, backed by a `board-spec` git repo — one branch per machine, each
 holding `boards/<machine>/machine.yaml` + `boards/<machine>/partition.yaml`)
 into the files `qcom-ptool` needs to produce a board's flashable partition
-artifacts, runs `qcom-ptool` to actually produce them, then opens a PR
-with just the source files against the configured qcom-ptool fork. The
-board-spec entry is the only source of partition facts this skill trusts
+artifacts, runs `qcom-ptool` to actually produce them, then opens and
+merges a PR with just the source files against the configured qcom-ptool
+fork. The board-spec entry is the only source of partition facts this skill trusts
 — never invent a size, GUID, or chip ID that isn't in the spec or copied
 verbatim from the named reference board.
 
@@ -278,7 +278,7 @@ Section 7) and must never end up in a qcom-ptool commit.
 Run `make lint` (ruff + mypy) only if you touched `qcom_ptool/` itself,
 which this workflow shouldn't.
 
-## 6. Commit and open the PR
+## 6. Commit, open the PR, and merge it
 
 Only after Section 5's `check-missing-files` passes and the generated
 `.xml`/`.bin` files have been deleted:
@@ -330,7 +330,7 @@ EOF
 ```
 
 - A `201` response with an `html_url` field means the PR was created —
-  report that URL back to the user.
+  note both `html_url` and `number` (needed for the merge step below).
 - A `422` usually means the branch has no diff against `base` (nothing to
   PR) or a PR already exists — read the `message`/`errors` fields and
   surface them rather than retrying blindly.
@@ -338,6 +338,40 @@ EOF
   re-check Section 0's prerequisite — don't fall back to printing a manual
   "go create this PR yourself" message as a silent default; the whole
   point of this step is that it's automatic.
+
+Once the PR exists, merge it — this is no longer a manual follow-up (only
+merging *upstream* into `qualcomm-linux/qcom-ptool`, Section 7 item 1,
+stays manual). GitHub computes the `mergeable` field asynchronously, so
+poll briefly before merging:
+
+```sh
+PR_NUMBER=<number from the 201 response>
+for i in 1 2 3; do
+  MERGEABLE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$QCOM_PTOOL_TARGET/pulls/$PR_NUMBER" | jq -r '.mergeable')
+  [ "$MERGEABLE" != "null" ] && break
+  sleep 2
+done
+
+curl -s -X PUT \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/$QCOM_PTOOL_TARGET/pulls/$PR_NUMBER/merge" \
+  -d "{\"commit_title\": \"Merge pull request #$PR_NUMBER: platforms/<machine>: add <storage> partition layout\", \"merge_method\": \"merge\"}"
+```
+
+- `merge_method: "merge"` always — a regular merge commit, not
+  squash/rebase.
+- If `mergeable` came back `false` (a real conflict, not just
+  "not computed yet"), stop and report — never force-merge a conflicting
+  PR.
+- A `200` response with `"merged": true` means success — capture the
+  response's `sha` (the merge commit SHA). This is the exact commit a
+  caller (e.g. the `distro-smith` orchestrator, or `qcom-yocto-new-machine`
+  bumping `qcom-ptool.inc`'s `SRCREV`) should point at next. Report the PR
+  URL and this merge commit SHA back to the user/caller.
+- A `405` (not mergeable) or `409` (SHA mismatch/race) — report the API's
+  `message` rather than retrying blindly.
 
 ## 7. How this reaches a real qcomflash package (context, not this skill's job)
 
@@ -353,23 +387,24 @@ then a machine's `QCOM_PARTITION_FILES_SUBDIR` (set in `conf/machine/
 which `<subdir>` to copy `gpt_*.bin`/`rawprogram*.xml`/`patch*.xml`/
 `contents.xml` from into the final `<image>.qcomflash/` directory.
 
-This skill only gets you through "these files exist, validate inside a
-qcom-ptool checkout, and are up as a PR against the fork." Getting them
-into an actual `qcomflash` build output additionally requires, as separate
-follow-up work (do not do this silently — confirm with the user first
-since it touches what gets built):
+This skill gets you through "these files exist, validated inside a
+qcom-ptool checkout, and are merged into the fork." Getting them into an
+actual `qcomflash` build output additionally requires, as separate
+follow-up work — automated by `qcom-yocto-new-machine`/`distro-smith` for
+items 2-4 below, but confirm with the user first if running standalone,
+since it touches what gets built:
 
-1. Merging the fork PR (Section 6) upstream into `qualcomm-linux/qcom-ptool`
-   (its own PR against `main`, per `CONTRIBUTING.md`: `make lint`,
-   `make generate-checksums` for the new files, `make all integration
-   check-checksums` with `PTOOL_SEED=qcom-ptool-ci` set) — the fork PR this
-   skill opens is a staging step, not the final upstream contribution,
-   unless the user's workflow treats the fork as authoritative.
+1. Merging the fork PR (Section 6, now automatic) upstream into
+   `qualcomm-linux/qcom-ptool` (its own PR against `main`, per
+   `CONTRIBUTING.md`: `make lint`, `make generate-checksums` for the new
+   files, `make all integration check-checksums` with
+   `PTOOL_SEED=qcom-ptool-ci` set) — the fork merge this skill performs is
+   a staging step, not the final upstream contribution, unless the user's
+   workflow treats the fork as authoritative. This step remains manual.
 2. Bumping `SRCREV` in `meta-qcom`'s `recipes-bsp/partition/qcom-ptool.inc`
-   to a commit that includes the merged files (or, for local-only testing
-   before the PR merges, a `.bbappend` overriding `SRCREV`/`SRC_URI` to
-   point at a local/fork branch — mention this option but don't apply it
-   without asking, since it's a build-config change).
+   to the fork merge commit from Section 6 — `qcom-yocto-new-machine`
+   does this automatically when given that commit SHA (e.g. via the
+   `distro-smith` orchestrator).
 3. Setting `QCOM_PARTITION_FILES_SUBDIR ?= "partitions/<machine>/<storage>"`
    (and `QCOM_PARTITION_FILES_SUBDIR_SPINOR` if applicable) in the
    machine's `.conf` — this is `qcom-yocto-new-machine`'s territory.
@@ -393,5 +428,5 @@ since it touches what gets built):
 - Never guess `DISTRO_GITHUB_ORG` — if it's unset, stop and ask. A wrong
   org silently pushes a branch and opens a PR against someone else's repo.
 - Report back exactly which files were written/generated, the
-  `check-missing-files` result, and the created PR's URL; don't just say
-  "done."
+  `check-missing-files` result, the created PR's URL, and the merge
+  commit SHA once merged; don't just say "done."

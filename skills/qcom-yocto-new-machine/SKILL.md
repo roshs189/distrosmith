@@ -10,14 +10,16 @@ description: >-
   board, kernel devicetree, boot/partition subdirs, etc.) are pulled from
   the board-spec MCP server (the board-spec repo — see Section 0) when a
   spec already exists for the machine, falling back to asking the user for
-  genuinely new boards. Once the machine conf/CI/recipes are written and
-  validated, automatically commits them and opens a PR against the
-  configured fork (`$DISTRO_GITHUB_ORG/meta-qcom` or
-  `$DISTRO_GITHUB_ORG/meta-qcom-3rdparty` — see Section 0) via the GitHub
-  REST API. Use when asked to "add a new machine/board to meta-qcom",
-  "bring up <board> in meta-qcom-3rdparty", "create a machine conf for
-  <SoC>", or "add CI yml for a new board". Do NOT use for building images
-  (see qcom-yocto-build-image), flashing/validating hardware (see
+  genuinely new boards. Optionally bumps recipes-bsp/partition/
+  qcom-ptool.inc's SRCREV to a merged qcom-ptool commit (see Section 9),
+  then triggers a real kas-container build targeting qcom-multimedia-image
+  (Section 10) — commits and opens a PR against the configured fork
+  (`$DISTRO_GITHUB_ORG/meta-qcom` or `$DISTRO_GITHUB_ORG/meta-qcom-3rdparty`
+  — see Section 0) via the GitHub REST API only if that build succeeds, and
+  always writes the run's result to distro-params.yaml (Section 12). Use
+  when asked to "add a new machine/board to meta-qcom", "bring up <board>
+  in meta-qcom-3rdparty", "create a machine conf for <SoC>", or "add CI yml
+  for a new board". Do NOT use for flashing/validating hardware (see
   qcom-flash-qdl, qcom-boot-validate), or running pre-PR checks on an
   already-written change (see qcom-yocto-pre-pr-checks).
 ---
@@ -42,12 +44,12 @@ env vars below and clones the repos this skill needs.
   `board-spec`, `board-spec-mcp`), always under those exact repo names. If
   it's unset, stop and ask the user for it rather than guessing — this
   value determines whose repo gets a branch pushed and a PR opened
-  against it (see Section 10).
+  against it (see Section 11).
 - **`GITHUB_TOKEN`** must be exported in the shell environment (a GitHub
   PAT — classic with `repo` scope, or fine-grained with `Contents:
   Read and write` + `Pull requests: Read and write` on the target
   layer repo). Covers both git push/fetch (over HTTPS) and the GitHub
-  REST API PR-creation call in Section 10 — no SSH key is used anywhere in
+  REST API PR-creation call in Section 11 — no SSH key is used anywhere in
   this skill.
   ```sh
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user
@@ -67,7 +69,7 @@ env vars below and clones the repos this skill needs.
   different path if they say their checkout lives somewhere else — don't
   default to cloning upstream `qualcomm-linux/meta-qcom` when no local
   checkout is given; this skill always targets the user's own fork so
-  Section 10's automated PR has somewhere to push to.
+  Section 11's automated PR has somewhere to push to.
 
 ## 1. Pick the target layer
 
@@ -244,7 +246,7 @@ covers '<fname>' for this kernel variant..."), the FIT image still builds
 with the DTBs included but zero `conf-N` config nodes, and the board only
 fails at boot time with UEFI logging `ParseFitDt: Cannot find correct config
 to boot, Falling to default config`. Do not rely on a successful
-`kas-container build` (step 9) to catch a missing entry — it won't.
+`kas-container build` (Section 10) to catch a missing entry — it won't.
 
 If step 2 found a board-spec entry, use `machine_creation.fit_dtb_compatible`
 directly: each `{compatible, dtbs}` pair becomes one flag line, encoding
@@ -342,21 +344,70 @@ meta-qcom-3rdparty additionally pins the meta-qcom dependency
 `ci/uno-q.yml` or `ci/radxa-dragon-q6a.yml`, which include `ci/base.yml`
 (itself pulling in `ci/meta-qcom.yml`) the same way.
 
-## 9. Validate
+## 9. New qcom-ptool commit only: bump `qcom-ptool.inc`'s `SRCREV`
 
-Per each layer's `AGENTS.md`, before considering this done:
+Skip this step entirely unless you were given a qcom-ptool commit SHA to
+point at — typically the merge commit SHA that `qcom-partition-conf-new-board`
+reports after Section 6's auto-merge (e.g. when invoked via the
+`distro-smith` orchestrator). This is not something to do speculatively
+when this skill is invoked standalone with no such SHA.
+
+If the layer has `recipes-bsp/partition/qcom-ptool.inc` and you do have a
+target SHA:
+
+```sh
+sed -i \
+  -e "s#^SRC_URI = .*#SRC_URI = \"git://github.com/\$DISTRO_GITHUB_ORG/qcom-ptool.git;branch=main;protocol=https\"#" \
+  -e "s#^SRCREV = .*#SRCREV = \"<merged-commit-sha>\"#" \
+  recipes-bsp/partition/qcom-ptool.inc
+```
+
+This is its own atomic commit, separate from the `conf/machine: add
+<machine>` commit (per `AGENTS.md`'s "each patch must be logically
+coherent, self-contained" rule):
+
+```sh
+git add recipes-bsp/partition/qcom-ptool.inc
+git commit -s -m "recipes-bsp/partition: point qcom-ptool at merged <machine> partitions"
+```
+
+## 10. Validate: trigger a real build
+
+Per each layer's `AGENTS.md`, before considering this done, run an actual
+build — do not skip it or treat it as merely a parse check:
 
 ```sh
 export KAS_YAMLS="ci/<machine>.yml:ci/qcom-distro.yml"
-"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}"
+"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}" --target qcom-multimedia-image
+```
+
+The explicit `--target qcom-multimedia-image` restricts the build to that
+one image instead of the full `ci/qcom-distro.yml` target list
+(`qcom-multimedia-image`, `qcom-multimedia-proprietary-image`,
+`qcom-container-orchestration-image`, `qcom-networking-image`) — the same
+`--target` override CI already uses for its SDK build step
+(`.github/workflows/compile.yml`).
+
+Record the actual build result (pass/fail; on failure, the tail of the
+build log) — **this result gates Section 11 next.** If the build fails,
+stop here: do not attempt to fix it automatically (that's explicitly out
+of scope for this skill) and do not proceed to Section 11 — go straight to
+Section 12 to report the failure and write `distro-params.yaml` with
+`status: "fail"`.
+
+If the build succeeds, continue:
+
+```sh
 ci/kas-container-shell-helper.sh ci/yocto-patchreview.sh
 ```
 
 Run `ci/kas-container-shell-helper.sh ci/yocto-check-layer.sh` before
-opening or updating a pull request. Do not skip straight to a PR without at
-least a successful `bitbake` parse/build of the new machine.
+opening or updating a pull request.
 
-## 10. Commit and open the PR
+## 11. Commit and open the PR
+
+**Only reachable after Section 10's build succeeded** — do not commit or
+open/update a PR off a failed or skipped build.
 
 Commit following the layer's `CONTRIBUTING.md`/`AGENTS.md`: subject
 `conf/machine: add <machine>` (or `recipes-bsp/<recipe>: add <machine>` for
@@ -422,6 +473,71 @@ EOF
   `qualcomm-linux/meta-qcom` (or the 3rdparty layer's upstream) is a
   separate, manual follow-up; don't do that without the user asking.
 
+## 12. Write `distro-params.yaml`
+
+Always write this file, whether Section 10's build passed or failed —
+write it in the directory this skill was invoked from (the invocation
+cwd, not the `BUILD_DISTRO_ROOT` checkout).
+
+On a successful build + PR (Section 11 ran):
+
+```yaml
+status: "pass"
+
+repo:        "https://github.com/$DISTRO_GITHUB_ORG/<repo>.git"
+branch:      "add/<machine>"
+type:        "distro"
+
+changes:
+  - type: pr
+    url: <qcom-ptool PR html_url, only if Section 9 ran this invocation>
+  - type: pr
+    url: <meta-qcom PR html_url from Section 11>
+  # Add more changes below (applied in listed order):
+  # - type: pr
+  #   url: https://github.com/qualcomm-linux/meta-qcom/pull/2717
+  # - type: commit
+  #   url: https://github.com/qualcomm-linux/meta-qcom/commit/abc1234
+  # - type: patch
+  #   path: /home/user/fixes/fix-audio.patch
+
+workspace:    "<local meta-qcom/meta-qcom-3rdparty checkout path used>"
+machine:      "<machine>"
+distro:       "qcom-distro"
+image:        "qcom-multimedia-image"
+build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/qcom-distro.yml>"
+```
+
+- List every PR/commit the whole chain produced, in the order they were
+  applied (qcom-ptool merge first if this run included Section 9, then
+  the meta-qcom PR) — not just this skill's own PR.
+- If invoked standalone (no Section 9 SRCREV-bump leg this run), omit the
+  first `changes` entry — only list what this run itself produced.
+- `workspace`/`machine`/`distro`/`image`/`build_config` are filled with
+  the actual values already known at this point, not left blank.
+
+On a failed build (Section 10 stopped things short):
+
+```yaml
+status: "fail"
+
+repo:        "https://github.com/$DISTRO_GITHUB_ORG/<repo>.git"
+branch:      "add/<machine>"
+type:        "distro"
+
+changes: []
+
+workspace:    "<local meta-qcom/meta-qcom-3rdparty checkout path used>"
+machine:      "<machine>"
+distro:       "qcom-distro"
+image:        "qcom-multimedia-image"
+build_config: "<KAS_YAMLS value used>"
+```
+
+`machine`/`distro`/`image`/`build_config` stay filled in even on failure —
+those are known regardless of whether the build succeeded; only `changes`
+is empty since nothing was committed or opened.
+
 ## Notes
 
 - meta-qcom's primary branch is `master`; meta-qcom-3rdparty's is `main`
@@ -432,6 +548,8 @@ EOF
   layers add only board-unique ones and depend on meta-qcom for the rest.
 - Never guess `DISTRO_GITHUB_ORG` — if it's unset, stop and ask. A wrong
   org silently pushes a branch and opens a PR against someone else's repo.
+- Never attempt to automatically fix a failed build (Section 10) — report
+  the failure and stop; that capability is explicitly out of scope here.
 - For subsequent work on the new machine, follow up with
   `qcom-yocto-build-image` (build), `qcom-flash-qdl`/`qcom-boot-validate`
   (flash and validate on hardware), and `qcom-yocto-pre-pr-checks` before
