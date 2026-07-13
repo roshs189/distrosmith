@@ -6,11 +6,13 @@ description: >-
   matching ci/<machine>.yml, a new conf/machine/include/qcom-<soc>.inc when
   the SoC has none yet, and — for third-party boards in meta-qcom-3rdparty —
   the firmware-boot/packagegroup/u-boot recipes a new board needs, modeled
-  on the uno-q and radxa-dragon-q6a additions. Board facts (SoC, reference
-  board, kernel devicetree, boot/partition subdirs, etc.) are pulled from
-  the board-spec MCP server (the board-spec repo — see Section 0) when a
-  spec already exists for the machine, falling back to asking the user for
-  genuinely new boards. Triggers a single real kas-container build
+  on the uno-q and radxa-dragon-q6a additions. Board facts (SoC, kernel
+  devicetree, boot/partition subdirs, etc.) are pulled from the board-spec
+  MCP server (the board-spec repo — see Section 0) when a spec already
+  exists for the machine, falling back to asking the user for genuinely new
+  boards — except which existing board to use as the structural template,
+  which the skill always picks itself and never asks about. Triggers a
+  single real kas-container build
   targeting qcom-console-image (Section 10) to validate the result, and
   reports pass/fail back to the caller. Does NOT bump qcom-ptool.inc's
   SRCREV, retry a failed build, open a PR, or write distro-params.yaml —
@@ -115,7 +117,11 @@ exists, it directly supplies:
 
 - **Machine name** — the spec's `machine` field.
 - **SoC** — the spec's `soc` field.
-- **Closest existing board** — the spec's `reference_board` field.
+- **Closest existing board** — the spec's `reference_board` field. A `null`
+  here just means no single board is the closest match — never ask the
+  user to name one; pick any existing board on the same SoC (or, failing
+  that, any existing board at all) as the structural template for Steps 3-5
+  below.
 - `machine_creation.kernel_devicetree`, `boot_files_subdir`,
   `partition_files_subdir`, `cdt_file`, `boot_firmware`, `cdt_firmware`,
   `uboot_config`, `machine_features_add`, `ci_includes` — feed these
@@ -137,14 +143,17 @@ board work with no spec authored — ask the user (don't guess):
   `-ride`, `-core-kit`, `-ride-sx`, or a third-party product name like
   `uno-q`, `radxa-dragon-q6a`). This becomes `MACHINE` and the filename.
 - **SoC** the board is based on (e.g. qcs6490, qcs8300, sdx75, qcm2290).
-- **Closest existing board** to copy from. If unsure, pick a machine on the
-  same SoC family — see step 3.
 - **Bootloader/firmware ownership** (3rdparty only): does the vendor ship
   its own bootloader/firmware blobs (like UNO Q's Arduino-signed bootloader
   zip), or does the board use the SPI-NOR/EDK2 image flashed independently
   by the vendor (like Radxa Dragon Q6A, which sets the boot firmware
   variables empty with a comment explaining why)? This decides whether you
   need a `firmware-boot` recipe at all.
+
+Pick the closest existing board to copy from yourself — prefer a machine on
+the same SoC family (see step 3), falling back to any existing machine
+conf if the SoC is also new. This is a structural-template choice, not a
+board fact, so never ask the user to name a reference board.
 
 Mention to the user that once these facts are settled, authoring a
 board-spec entry (PR into the board-spec repo, see that repo's README) is

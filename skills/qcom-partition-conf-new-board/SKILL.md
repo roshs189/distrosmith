@@ -36,7 +36,10 @@ artifacts, runs `qcom-ptool` to actually produce them, then opens and
 merges a PR with just the source files against the configured qcom-ptool
 fork. The board-spec entry is the only source of partition facts this skill trusts
 — never invent a size, GUID, or chip ID that isn't in the spec or copied
-verbatim from the named reference board.
+verbatim from a reference board. When the spec has no `reference_board`
+(a `null` value is valid and common), pick any existing board's files as
+the structural template for the header/boilerplate — never ask the user
+to name one.
 
 This skill is part of the `distrosmith` bundle — see that repo's
 `README.md` for the one-time `setup.py` install step that provisions the
@@ -177,10 +180,17 @@ checkout the MCP server doesn't have visibility into:
   ```
   A hit means either the spec is wrong (reusing an existing chip ID) or
   there's a real naming collision to raise with the user.
-- Confirm the `reference_board` path actually exists in the qcom-ptool
-  checkout (`ls <qcom-ptool>/platforms/<ref-board>/<storage>/`) —
+- If `reference_board` is populated, confirm its path actually exists in the
+  qcom-ptool checkout (`ls <qcom-ptool>/platforms/<ref-board>/<storage>/`) —
   `validate_board_spec` only warns if the board is missing across other
   spec branches, it can't see the qcom-ptool filesystem.
+- If `reference_board` is `null` (no single reference board applies), pick
+  any existing board in the qcom-ptool checkout as the structural
+  template — prefer one with the same `storage_type` if available, but the
+  `partitions.conf` header and `contents.xml.in` boilerplate are identical
+  across every board in the repo, so which one you pick doesn't materially
+  matter. Never ask the user which board to copy this boilerplate from —
+  that's your call to make, not theirs.
 
 ## 3. Write `partitions.conf`
 
@@ -188,8 +198,9 @@ Path: `<qcom-ptool>/platforms/<machine>/<storage>/partitions.conf`.
 
 - Copy the standard header (copyright + SPDX + the `--disk`/`--partition`
   flag-reference comment block) verbatim from the reference board's
-  `partitions.conf` — every existing file in the repo uses the identical
-  block, don't reword it.
+  `partitions.conf` — or, if `reference_board` is `null`, from any existing
+  board's `partitions.conf` (see Section 2); every existing file in the
+  repo uses the identical block, don't reword it.
 - Emit `partition_conf.disk` verbatim as the `--disk` line.
 - Emit one `--partition` line per entry in `partition_conf.partitions`,
   **in list order** (already grouped by LUN ascending):
@@ -212,12 +223,15 @@ Path: `<qcom-ptool>/platforms/<machine>/<storage>/partitions.conf`.
 Path: `<qcom-ptool>/platforms/<machine>/<storage>/contents.xml.in`.
 
 - If `partition_conf.contents_xml_in` is `null`/absent: copy the reference
-  board's `contents.xml.in` byte-for-byte into the new path — do not
-  re-serialize it (whitespace and element order matter to
-  `gen_contents.py`'s XML parsing, and there's no reason to touch a file
-  that isn't changing).
+  board's `contents.xml.in` byte-for-byte into the new path — or, if
+  `reference_board` is itself `null`, copy any existing board's
+  `contents.xml.in` (see Section 2) — do not re-serialize it (whitespace
+  and element order matter to `gen_contents.py`'s XML parsing, and there's
+  no reason to touch a file that isn't changing).
 - If `partition_conf.contents_xml_in` is populated: start from the
-  reference board's `contents.xml.in` and substitute only:
+  reference board's `contents.xml.in` — or, if `reference_board` is
+  `null`, any existing board's `contents.xml.in` (see Section 2) — and
+  substitute only:
   - `<product_info><product_name>` → `contents_xml_in.product_name`.
   - The `<chipid flavor="default" storage_type="<storage_type>">`
     element's text → `contents_xml_in.chip_id_default`.
@@ -420,10 +434,14 @@ gets built:
 ## Notes
 
 - Never fabricate a partition name, size, or type-GUID that isn't either in
-  the board-spec entry or copied verbatim from the named reference board —
-  these correspond to a real boot ROM/XBL/firmware contract on physical
-  silicon; a wrong GUID or size produces a board that fails to boot, not
-  just a lint error.
+  the board-spec entry or copied verbatim from the reference board (or, if
+  `reference_board` is `null`, any existing board used as the structural
+  template per Section 2) — these correspond to a real boot ROM/XBL/firmware
+  contract on physical silicon; a wrong GUID or size produces a board that
+  fails to boot, not just a lint error. A `null` `reference_board` only
+  means "no single board is the closest match" — it never blocks this
+  skill or requires asking the user to name one; pick any existing board
+  for boilerplate structure and move on.
 - If the board-spec branch is missing, fails `validate_board_spec` with
   `schema_errors`, or has fields that don't map cleanly to the shapes
   described above, stop and ask — do not fall back to inventing a
