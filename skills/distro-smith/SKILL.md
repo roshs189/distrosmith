@@ -3,43 +3,85 @@ name: distro-smith
 description: >-
   End-to-end distro bring-up for a board: generate and merge its
   qcom-ptool partition files, bump meta-qcom's qcom-ptool.inc SRCREV to
-  that merged commit, trigger a real kas-container build (whatever image
-  qcom-yocto-new-machine's Section 10 targets, attempting a fix and retry
-  if it fails), and — only once the build succeeds — commit and open the
+  that merged commit, trigger a real kas-container build for the explicit
+  --distro and --image inputs (unless --skip-build is explicitly passed),
+  attempting a fix and retry if it fails, and — once the build succeeds or
+  the explicit skip-build path is selected — commit and open the
   meta-qcom PR. This skill (not qcom-yocto-new-machine) owns the SRCREV
   bump, the build-retry loop, the PR automation, and distro-params.yaml —
-  qcom-yocto-new-machine only gets a board as far as a single, non-retrying
-  build attempt. Always writes the run's result to distro-params.yaml, and
+  qcom-yocto-new-machine only gets a board as far as generated machine files
+  and a generated-file summary. Always writes the run's result to distro-params.yaml, and
   on a successful run cleans up its own clone work directory once that
   file is written
   (failed runs keep the work directory for debugging). Stitches together
   qcom-partition-conf-new-board and qcom-yocto-new-machine into one
   invocation. Use for "run the build distro skill for <machine>", "do the
-  full distro flow for <machine>", or "run distro-smith for <machine>". Do
+  full distro flow for <machine>", or "run distro-smith for <machine>".
+  Accepts --machine <machine>, --distro <distro>, --image <image>, and the
+  explicit escape hatch --skip-build; never assume default distro or image
+  values. Do
   NOT use for just the partition files (use qcom-partition-conf-new-board
   alone) or just the machine conf (use qcom-yocto-new-machine alone) —
-  this skill exists specifically to chain both together with a real gated
-  build in between.
+  this skill exists specifically to chain both together with a distro PR
+  artifact for downstream build orchestration.
 ---
 
 # Run the full distro-smith flow for a board
 
 Sequences `qcom-partition-conf-new-board` and `qcom-yocto-new-machine` so
-one invocation ("run distro-smith for `<machine>`") takes a board from its
-board-spec entry all the way to a merged qcom-ptool PR, a real build, and
-(on success) an open meta-qcom PR — ending in one `distro-params.yaml`
-that reports what happened.
+one invocation takes a board from its board-spec entry all the way to a
+merged qcom-ptool PR, a real build, and (on success) an open meta-qcom PR
+— ending in one `distro-params.yaml` that reports what happened.
+
+Required invocation form:
+
+```bash
+$distro-smith --machine <machine> --distro <distro> --image <image> [--skip-build]
+```
+
+Treat these as required inputs:
+
+- `--machine <machine>`: target machine name used for partition and machine
+  bring-up.
+- `--distro <distro>`: Yocto distro to use in the build configuration and to
+  write into `distro-params.yaml`.
+- `--image <image>`: image target to build and to write into
+  `distro-params.yaml`.
+- `--skip-build`: explicit escape hatch for cases where the user wants to
+  raise the meta-qcom PR and produce `distro-params.yaml` without running
+  the kas build or build retry loop. Do not infer this option; only use it
+  when passed by the user.
+
+Do not use fallback distro or image names. If either `--distro` or `--image`
+is missing, stop before step 1 and ask for the missing value.
 
 `qcom-yocto-new-machine` only writes the machine conf, CI yaml, and
-supporting recipes, then runs a single non-retrying build (its own Section
-10) to sanity-check the result. Everything past that — bumping
-`qcom-ptool.inc`'s `SRCREV`, retrying a failed build with a fix, committing,
-opening the meta-qcom PR, and writing `distro-params.yaml` — is this
-skill's own responsibility, not `qcom-yocto-new-machine`'s. That skill's
-own `SKILL.md` remains the source of truth for its own steps and
-prerequisites (env vars, checkout locations — see its Section 0).
+supporting recipes. It does not build, validate, run pre-PR checks, commit,
+open a PR, or write `distro-params.yaml`. Everything past file generation —
+bumping `qcom-ptool.inc`'s `SRCREV`, running the build, retrying a failed
+build with a fix, committing, opening the meta-qcom PR, and writing
+`distro-params.yaml` — is this skill's own responsibility.
+`qcom-yocto-new-machine`'s `SKILL.md` remains the source of truth for its
+own file-generation steps and prerequisites (env vars, checkout locations —
+see its Section 0).
 
-## 0. Scope check: meta-qcom only
+## 0. Parse inputs and scope check
+
+Parse `--machine`, `--distro`, and `--image` from the invocation. Use exactly
+the first value supplied for each argument throughout this run. Do not infer or
+replace these values later.
+
+Validate:
+
+- `--machine` is non-empty.
+- `--distro` is non-empty.
+- `--image` is non-empty.
+- `--skip-build`, if present, is recorded as an intentional validation skip
+  in status output, the PR body, and `distro-params.yaml`.
+
+Then perform the meta-qcom scope check below.
+
+### meta-qcom only
 
 This flow assumes the target layer is **meta-qcom**, not
 meta-qcom-3rdparty — the `qcom-ptool.inc`/`SRCREV` dependency this skill
@@ -49,9 +91,50 @@ board, say so and offer to run `qcom-partition-conf-new-board` and
 still get partition files and a machine conf, just not through this
 chained flow).
 
+## 0a. Existing meta-qcom PR fast path
+
+Before cloning work directories or invoking `qcom-partition-conf-new-board` /
+`qcom-yocto-new-machine`, check whether a meta-qcom PR already exists for the
+standard branch `add/<machine>`:
+
+```sh
+curl -s \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/$DISTRO_GITHUB_ORG/meta-qcom/pulls?head=$DISTRO_GITHUB_ORG:add/<machine>&state=open"
+```
+
+If the response is a non-empty array, do not run the normal flow. Instead,
+write `distro-params.yaml` in the invocation cwd immediately and stop:
+
+```yaml
+status: "pass"
+
+repo:        "https://github.com/$DISTRO_GITHUB_ORG/meta-qcom.git"
+branch:      "add/<machine>"
+type:        "distro"
+
+changes:
+  - type: pr
+    url: <existing meta-qcom PR html_url>
+
+workspace:    ""
+machine:      "<machine>"
+distro:       "<distro>"
+image:        "<image>"
+build_config: "ci/<machine>.yml:ci/<distro>.yml"
+build_result: "existing-pr"
+```
+
+This fast path exists so orchestrators can consume an already-open machine PR
+without repeating the partition/machine-conf generation flow. If the response
+is empty, continue to step 1 and run the normal flow. If GitHub returns `401`
+or another API error, stop and report the error; do not guess whether a PR
+exists.
+
 ## 1. Run `qcom-partition-conf-new-board`
 
-Follow that skill's Sections 0-6 for `<machine>` exactly as documented —
+Follow that skill's Sections 0-6 for the parsed `<machine>` exactly as documented —
 this includes the auto-merge step (Section 6). Capture two things
 from its result:
 
@@ -67,17 +150,15 @@ leg.
 
 ## 2. Run `qcom-yocto-new-machine`
 
-Follow that skill's Sections 0-9 for `<machine>` (target layer:
+Follow that skill's Sections 0-10 for the parsed `<machine>` (target layer:
 meta-qcom): prerequisites, board-spec lookup, template selection, machine
 conf, FIT_DTB_COMPATIBLE entries, any new-SoC scaffold, CI yaml, and its
-autopilot outstanding-items summary. Then follow its Section 10 to trigger
-one real `kas-container build` — that skill stops there, reporting
-pass/fail back to this orchestrator without retrying, committing, or
-opening a PR itself.
+autopilot outstanding-items/generated-file summary. It must return after file
+generation; do not ask it to run a build or validation step.
 
 From this point on, this skill (not `qcom-yocto-new-machine`) drives
 everything else: the `SRCREV` bump (step 2a), the build-retry loop (step
-2b), and the commit + PR (step 2c).
+2b), pre-PR checks, and the commit + PR (step 2c).
 
 ### 2a. Bump `qcom-ptool.inc`'s `SRCREV`
 
@@ -103,13 +184,18 @@ git commit -s -m "recipes-bsp/partition: point qcom-ptool at merged <machine> pa
 
 ### 2b. Build with diagnose/fix/retry
 
-If step 2's build (via `qcom-yocto-new-machine`'s Section 10) already
-passed before the SRCREV bump above, re-run it now that
-`qcom-ptool.inc` has changed:
+If `--skip-build` was passed, do not run `kas-container`, do not run the
+diagnose/fix/retry loop, and do not run `yocto-patchreview.sh` or
+`yocto-check-layer.sh`. Print a clear warning that validation was skipped by
+explicit user request, record `build_result: "skipped"` for step 3, and
+continue to step 2c.
+
+Otherwise, run the first real build after the machine files are generated and
+`qcom-ptool.inc` has been bumped:
 
 ```sh
-export KAS_YAMLS="ci/<machine>.yml:ci/qcom-distro.yml"
-"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}" --target qcom-console-image
+export KAS_YAMLS="ci/<machine>.yml:ci/<distro>.yml"
+"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}" --target <image>
 ```
 
 Record the actual build result (pass/fail; on failure, the tail of the
@@ -153,8 +239,10 @@ before opening or updating the pull request.
 
 ### 2c. Commit and open the meta-qcom PR
 
-**Only reachable after step 2b's build succeeded** — do not commit or
-open/update a PR off a failed or skipped build.
+Only reachable after step 2b's build succeeded, or when `--skip-build` was
+explicitly passed. Do not commit or open/update a PR off a failed build.
+When `--skip-build` was passed, make the skipped validation visible in the PR
+body and in `distro-params.yaml`.
 
 Commit following meta-qcom's `CONTRIBUTING.md`/`AGENTS.md`: split the
 change into logically separate, independently buildable commits rather
@@ -222,17 +310,17 @@ allowed" rule (where that rule exists; otherwise still prefer a new commit
 over rewriting one already pushed).
 
 - Branch name is always `add/<machine>`. If it already exists on `origin`
-  (e.g. a prior run for this board), stop and ask the user whether to
-  force-push an update or pick a different branch name — never force-push
-  silently.
-- Before pushing, check whether a PR already exists for this branch to
-  avoid opening a duplicate:
+  without an open PR, stop and ask the user whether to force-push an update
+  or pick a different branch name — never force-push silently.
+- Before pushing, re-check whether a PR already exists for this branch to
+  guard against a race with another run:
   ```sh
   curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/$DISTRO_GITHUB_ORG/meta-qcom/pulls?head=$DISTRO_GITHUB_ORG:add/<machine>&state=open"
   ```
-  A non-empty array means one's already open — report its `html_url` back
-  to the user instead of creating a second one.
+  A non-empty array means one's already open. Write the same
+  `distro-params.yaml` fast-path artifact described in step 0a, report its
+  `html_url`, and stop instead of creating a second PR.
 
 Then open the PR against `$DISTRO_GITHUB_ORG/meta-qcom`'s default branch
 via the GitHub REST API (no `gh` CLI or browser step needed):
@@ -251,6 +339,18 @@ curl -s -X POST \
   "draft": false
 }
 EOF
+```
+
+If `--skip-build` was passed, use this PR body instead:
+
+```json
+{
+  "title": "conf/machine: add <machine>",
+  "head": "add/<machine>",
+  "base": "master",
+  "body": "Adds <machine> (<SoC>) via the distro-smith skill.\n\nValidation skipped by explicit --skip-build request; kas-container build, yocto-patchreview.sh, and yocto-check-layer.sh were not run.",
+  "draft": false
+}
 ```
 
 - A `201` response with an `html_url` field means the PR was created —
@@ -296,15 +396,50 @@ changes:
 
 workspace:    "<local meta-qcom checkout path used>"
 machine:      "<machine>"
-distro:       "qcom-distro"
-image:        "<image built in step 2b, e.g. qcom-console-image>"
-build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/qcom-distro.yml>"
+distro:       "<distro>"
+image:        "<image>"
+build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/<distro>.yml>"
+build_result: "pass"
+validation:
+  build: "pass"
+  patchreview: "pass"
+  check_layer: "pass"
 ```
 
 - List every PR/commit the whole chain produced, in the order they were
   applied: the qcom-ptool merge first, then the meta-qcom PR.
 - `workspace`/`machine`/`distro`/`image`/`build_config` are filled with
   the actual values already known at this point, not left blank.
+
+On a successful PR with `--skip-build`:
+
+```yaml
+status: "pass"
+
+repo:        "https://github.com/$DISTRO_GITHUB_ORG/meta-qcom.git"
+branch:      "add/<machine>"
+type:        "distro"
+
+changes:
+  - type: pr
+    url: <qcom-ptool PR html_url from step 1>
+  - type: pr
+    url: <meta-qcom PR html_url from step 2c>
+
+workspace:    "<local meta-qcom checkout path used>"
+machine:      "<machine>"
+distro:       "<distro>"
+image:        "<image>"
+build_config: "ci/<machine>.yml:ci/<distro>.yml"
+build_result: "skipped"
+validation:
+  build: "skipped by explicit --skip-build"
+  patchreview: "skipped by explicit --skip-build"
+  check_layer: "skipped by explicit --skip-build"
+```
+
+This is still `status: "pass"` so qli-orchestrator can consume it and invoke
+`build-distro`, but the skipped validation must remain visible.
 
 On a failed build (step 2b's retry cap was exhausted):
 
@@ -319,9 +454,10 @@ changes: []
 
 workspace:    "<local meta-qcom checkout path used>"
 machine:      "<machine>"
-distro:       "qcom-distro"
-image:        "<image built in step 2b, e.g. qcom-console-image>"
+distro:       "<distro>"
+image:        "<image>"
 build_config: "<KAS_YAMLS value used>"
+build_result: "fail"
 ```
 
 `machine`/`distro`/`image`/`build_config` stay filled in even on failure —

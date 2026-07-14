@@ -11,17 +11,15 @@ description: >-
   MCP server (the board-spec repo — see Section 0) when a spec already
   exists for the machine, falling back to asking the user for genuinely new
   boards — except which existing board to use as the structural template,
-  which the skill always picks itself and never asks about. Triggers a
-  single real kas-container build
-  targeting qcom-console-image (Section 10) to validate the result, and
-  reports pass/fail back to the caller. Does NOT bump qcom-ptool.inc's
-  SRCREV, retry a failed build, open a PR, or write distro-params.yaml —
-  those are the `distro-smith` orchestrator's job (see that skill's
-  SKILL.md) when this skill is run as part of the combined flow. Use when
+  which the skill always picks itself and never asks about. Does NOT run
+  builds, validate images, bump qcom-ptool.inc's SRCREV, retry failures,
+  open a PR, or write distro-params.yaml — those are the `distro-smith`
+  orchestrator's job (see that skill's SKILL.md) when this skill is run as
+  part of the combined flow. Use when
   asked to "add a new machine/board to meta-qcom", "bring up <board> in
   meta-qcom-3rdparty", "create a machine conf for <SoC>", or "add CI yml
   for a new board". Do NOT use for flashing/validating hardware (see
-  qcom-flash-qdl, qcom-boot-validate), running pre-PR checks on an
+  qcom-flash-qdl, qcom-boot-validate), running builds/pre-PR checks on an
   already-written change (see qcom-yocto-pre-pr-checks), or the full
   build-retry-PR flow (see distro-smith).
 ---
@@ -45,7 +43,7 @@ env vars below and clones the repos this skill needs.
   `distrosmith`-managed forks (`meta-qcom`, `meta-qcom-3rdparty` if used,
   `board-spec`, `board-spec-mcp`), always under those exact repo names. If
   it's unset, stop and ask the user for it rather than guessing — this
-  value determines whose fork this skill clones and builds against.
+  value determines whose fork this skill clones and edits.
 - **`GITHUB_TOKEN`** must be exported in the shell environment (a GitHub
   PAT — classic with `repo` scope, or fine-grained with `Contents:
   Read and write` on the target layer repo). Covers git clone/fetch over
@@ -82,14 +80,15 @@ env vars below and clones the repos this skill needs.
   Every fact that would otherwise trigger a question instead gets a
   `TODO_FILL_IN_<FIELD>` placeholder written directly into the generated
   file. Keep a running list of every placeholder written (file + field),
-  and print it as a single outstanding-items summary before Section 10's
-  build (see that section) instead of interrupting mid-flow. Autopilot
+  and print it as a single outstanding-items summary before returning to
+  the caller instead of interrupting mid-flow. Autopilot
   still never fabricates a real-looking value (sha256sum, build ID,
   download URL, node name) — a placeholder is the only allowed substitute
   for a genuinely unknown fact. This matters because `distro-smith`'s
   orchestrator can invoke this skill headlessly, with no one to answer an
-  `AskUserQuestion` prompt. Default (unset) keeps the normal
-  ask-when-missing flow described throughout this skill.
+  `AskUserQuestion` prompt. `distro-smith` owns build/validation after this
+  skill returns. Default (unset) keeps the normal ask-when-missing flow
+  described throughout this skill.
 
 ## 1. Pick the target layer
 
@@ -349,8 +348,8 @@ warn loudly — the task only logs a `bb.note()` ("No FIT_DTB_COMPATIBLE entry
 covers '<fname>' for this kernel variant..."), the FIT image still builds
 with the DTBs included but zero `conf-N` config nodes, and the board only
 fails at boot time with UEFI logging `ParseFitDt: Cannot find correct config
-to boot, Falling to default config`. Do not rely on a successful
-`kas-container build` (Section 10) to catch a missing entry — it won't.
+to boot, Falling to default config`. Do not rely on `distro-smith`'s build
+step to catch a missing entry — it won't.
 
 If step 2 found a board-spec entry, use `machine_creation.fit_dtb_compatible`
 directly: each `{compatible, dtbs}` pair becomes one flag line, encoding
@@ -536,7 +535,7 @@ meta-qcom-3rdparty additionally pins the meta-qcom dependency
 
 If `DISTRO_AUTOPILOT` was set (Section 0) and any `TODO_FILL_IN_...`
 placeholder was written during the run (Sections 2/5/6/7), stop here and
-print a single consolidated list before moving to validation: one line per
+print a single consolidated list before returning: one line per
 placeholder, giving the file it's in and the variable/field name (e.g.
 `firmware-qcom-boot-<board>_00036.bb: SRC_URI[bootbinaries.sha256sum] =
 TODO_FILL_IN_BOOTBINARIES_SHA256SUM`). This is the one point in an
@@ -546,40 +545,18 @@ placeholder, skip this step. When autopilot was not used, this step is a
 no-op (any missing field was already resolved interactively as each
 section needed it).
 
-## 10. Validate: trigger a real build
+## 10. Return generated file summary
 
-Per each layer's `AGENTS.md`, before considering this done, run an actual
-build — do not skip it or treat it as merely a parse check:
+Do not run a build, image validation, patch review, check-layer, commit, push,
+or PR step in this skill. This skill is complete when it has:
 
-```sh
-export KAS_YAMLS="ci/<machine>.yml:ci/qcom-distro.yml"
-"${KAS_CONTAINER:-kas-container}" build "${KAS_YAMLS}" --target qcom-console-image
-```
+- written the machine conf, CI yaml, and any supporting recipes it owns,
+- printed the autopilot outstanding-items summary, if any,
+- reported the generated/modified file list back to the caller.
 
-The explicit `--target qcom-console-image` restricts the build to that
-one image instead of the full `ci/qcom-distro.yml` target list
-(`qcom-multimedia-image`, `qcom-multimedia-proprietary-image`,
-`qcom-container-orchestration-image`, `qcom-networking-image`) — the same
-`--target` override CI already uses for its SDK build step
-(`.github/workflows/compile.yml`).
-
-Report the actual build result back to the caller (the user, or
-`distro-smith` when invoked as part of that orchestration): pass/fail, and
-on failure the tail of the build log. This skill does not retry a failed
-build, diagnose the failure, commit, or open a PR itself — a single build
-attempt is the full extent of this step. Retrying with a fix, committing,
-and opening a PR are `distro-smith`'s responsibility when this skill runs
-as part of that flow; when this skill runs standalone, that follow-up work
-is the user's to do by hand or by invoking `distro-smith` next.
-
-If the build succeeds, continue:
-
-```sh
-ci/kas-container-shell-helper.sh ci/yocto-patchreview.sh
-```
-
-Run `ci/kas-container-shell-helper.sh ci/yocto-check-layer.sh` before
-opening or updating a pull request.
+When invoked by `distro-smith`, return control to `distro-smith`; that skill
+owns the build command, diagnose/fix/retry loop, pre-PR checks, commits, PR
+creation, and `distro-params.yaml`.
 
 ## Notes
 

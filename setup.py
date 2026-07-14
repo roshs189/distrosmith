@@ -18,6 +18,7 @@ DEFAULT_REPO_ROOT = str(Path.cwd() / ".distrosmith-work")
 ENV_FILE = Path.home() / ".distrosmith" / "env"
 SKILLS_SRC = Path(__file__).resolve().parent / "skills"
 SKILLS_DEST = Path.home() / ".claude" / "skills"
+DEFAULT_QLI_ORCH_LOG_DIR = str(Path.home() / ".qli-orchestrator")
 
 
 def parse_args():
@@ -28,6 +29,12 @@ def parse_args():
                     help=f"Local root to clone repos into (default: {DEFAULT_REPO_ROOT})")
     p.add_argument("--token", default=os.environ.get("GITHUB_TOKEN"),
                     help="GitHub PAT (or set GITHUB_TOKEN); prompted for if omitted")
+    p.add_argument("--conf-email", default=os.environ.get("CONF_EMAIL"),
+                    help="Optional Confluence email for build-distro (or set CONF_EMAIL)")
+    p.add_argument("--conf-token", default=os.environ.get("CONF_TOKEN"),
+                    help="Optional Confluence token for build-distro (or set CONF_TOKEN)")
+    p.add_argument("--qli-orch-log-dir", default=os.environ.get("QLI_ORCH_LOG_DIR", DEFAULT_QLI_ORCH_LOG_DIR),
+                    help=f"Optional qli-orchestrator log directory (default: {DEFAULT_QLI_ORCH_LOG_DIR})")
     p.add_argument("--skip-clone", action="store_true",
                     help="Skip cloning the 4 repos (useful for re-running the rest)")
     return p.parse_args()
@@ -51,6 +58,7 @@ def verify_token(token):
     if not login:
         sys.exit("GET /user succeeded but returned no 'login' field — unexpected response.")
     print(f"Token OK, authenticated as {login}")
+    return login
 
 
 def clone_repo(org, name, root, token):
@@ -108,14 +116,48 @@ def install_skills():
         print(f"  installed skill: {skill_dir.name} -> {dest}")
 
 
-def persist_env(org, repo_root, token):
+def sh_export(name, value):
+    return f'export {name}="{value}"\n'
+
+
+def persist_env(org, repo_root, token, gh_user, conf_email="", conf_token="", qli_orch_log_dir=""):
     ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    ENV_FILE.write_text(
-        f'export DISTRO_GITHUB_ORG="{org}"\n'
-        f'export BUILD_DISTRO_ROOT="{repo_root}"\n'
-        f'export GITHUB_TOKEN="{token}"\n'
-    )
+    lines = [
+        sh_export("DISTRO_GITHUB_ORG", org),
+        sh_export("BUILD_DISTRO_ROOT", repo_root),
+        sh_export("GITHUB_TOKEN", token),
+        # build-distro aliases
+        sh_export("GH_USER", gh_user),
+        'export GH_TOKEN="$GITHUB_TOKEN"\n',
+    ]
+    if conf_email:
+        lines.append(sh_export("CONF_EMAIL", conf_email))
+    if conf_token:
+        lines.append(sh_export("CONF_TOKEN", conf_token))
+    if qli_orch_log_dir:
+        lines.append(sh_export("QLI_ORCH_LOG_DIR", qli_orch_log_dir))
+    ENV_FILE.write_text("".join(lines))
     ENV_FILE.chmod(0o600)
+
+
+def print_readiness_checklist(args, gh_user, board_spec_mcp_bin):
+    print()
+    print("QLI orchestrator readiness checklist:")
+    print(f"  [x] DISTRO_GITHUB_ORG={args.org}")
+    print(f"  [x] BUILD_DISTRO_ROOT={args.repo_root}")
+    print(f"  [x] GITHUB_TOKEN verified for GH_USER={gh_user}")
+    print("  [x] GH_TOKEN will alias GITHUB_TOKEN for build-distro")
+    if args.conf_email and args.conf_token:
+        print("  [x] CONF_EMAIL / CONF_TOKEN configured")
+    else:
+        print("  [ ] CONF_EMAIL / CONF_TOKEN not configured; add them if build-distro needs Confluence")
+    if board_spec_mcp_bin:
+        print(f"  [x] board-spec MCP registered: {board_spec_mcp_bin}")
+    else:
+        print("  [ ] board-spec MCP not registered; check board-spec-mcp checkout/setup")
+    print(f"  [x] QLI_ORCH_LOG_DIR={args.qli_orch_log_dir}")
+    print("  [ ] Verify qli-orchestrator, build-distro, and flash-test skills are installed in your runtime")
+    print("  [ ] Verify lab flash MCP server, devices.json, board USB, and firewall before flashing")
 
 
 def main():
@@ -128,7 +170,7 @@ def main():
         sys.exit("GITHUB_TOKEN is required — pass --token or export GITHUB_TOKEN.")
 
     print("Verifying GitHub token...")
-    verify_token(token)
+    gh_user = verify_token(token)
 
     if not args.skip_clone:
         print(f"Cloning repos under {args.repo_root} from org '{args.org}'...")
@@ -145,13 +187,22 @@ def main():
     print(f"Installing skills into {SKILLS_DEST}...")
     install_skills()
 
-    persist_env(args.org, args.repo_root, token)
+    persist_env(
+        args.org,
+        args.repo_root,
+        token,
+        gh_user,
+        conf_email=args.conf_email or "",
+        conf_token=args.conf_token or "",
+        qli_orch_log_dir=args.qli_orch_log_dir or "",
+    )
 
     print()
     print("Setup complete.")
     print(f"  Repos cloned under: {args.repo_root}")
     print(f"  Skills installed:   {SKILLS_DEST}")
     print(f"  Env vars written to: {ENV_FILE} (chmod 600)")
+    print_readiness_checklist(args, gh_user, board_spec_mcp_bin)
     print()
     print(f"Add this to your shell rc to persist across sessions:")
     print(f"  source {ENV_FILE}")
