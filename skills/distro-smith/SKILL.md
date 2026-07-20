@@ -1,25 +1,28 @@
 ---
 name: distro-smith
 description: >-
-  End-to-end distro bring-up for a board: generate and merge its
-  qcom-ptool partition files, bump meta-qcom's qcom-ptool.inc SRCREV to
-  that merged commit, trigger a real kas-container build for the explicit
-  --distro and --image inputs (unless --skip-build is explicitly passed),
-  attempting a fix and retry if it fails, and — once the build succeeds or
-  the explicit skip-build path is selected — commit and open the
-  meta-qcom PR. This skill (not qcom-yocto-new-machine) owns the SRCREV
-  bump, the build-retry loop, the PR automation, and distro-params.yaml —
-  qcom-yocto-new-machine only gets a board as far as generated machine files
-  and a generated-file summary. Always writes the run's result to distro-params.yaml, and
-  on a successful run cleans up its own clone work directory once that
-  file is written
+  End-to-end distro bring-up for a board: generate its qcom-ptool
+  partition files and open (but never merge) a PR for them, bump
+  meta-qcom's qcom-ptool.inc SRCREV directly to that PR's head commit,
+  trigger a real kas-container build for the --distro and --image inputs
+  (defaulting to qcom-distro/qcom-console-image when not given) unless
+  --skip-build is passed or this run is invoked as part of an orchestrating
+  pipeline, attempting a fix and retry if the build fails, and — once the
+  build succeeds or is skipped — commit and open the meta-qcom PR. This
+  skill (not qcom-yocto-new-machine) owns the SRCREV bump, the build-retry
+  loop, the PR automation, and distro-params.yml — qcom-yocto-new-machine
+  only gets a board as far as generated machine files and a generated-file
+  summary. Neither the qcom-ptool PR nor the meta-qcom PR is ever
+  auto-merged by this skill — both are left open for the user to review and
+  merge by hand. Always writes the run's result to
+  distro-params.yml outside the clone work directory, and on a successful
+  run cleans up its own clone work directory once that file is written
   (failed runs keep the work directory for debugging). Stitches together
   qcom-partition-conf-new-board and qcom-yocto-new-machine into one
   invocation. Use for "run the build distro skill for <machine>", "do the
   full distro flow for <machine>", or "run distro-smith for <machine>".
   Accepts --machine <machine>, --distro <distro>, --image <image>, and the
-  explicit escape hatch --skip-build; never assume default distro or image
-  values. Do
+  explicit escape hatch --skip-build. Do
   NOT use for just the partition files (use qcom-partition-conf-new-board
   alone) or just the machine conf (use qcom-yocto-new-machine alone) —
   this skill exists specifically to chain both together with a distro PR
@@ -29,38 +32,47 @@ description: >-
 # Run the full distro-smith flow for a board
 
 Sequences `qcom-partition-conf-new-board` and `qcom-yocto-new-machine` so
-one invocation takes a board from its board-spec entry all the way to a
-merged qcom-ptool PR, a real build, and (on success) an open meta-qcom PR
-— ending in one `distro-params.yaml` that reports what happened.
+one invocation takes a board from its board-spec entry all the way to an
+open qcom-ptool PR, a real build against that PR's head commit, and (on
+success) an open meta-qcom PR — ending in one `distro-params.yml` that
+reports what happened. Neither PR is merged by this skill; both stay open
+for the user's own review.
 
 Required invocation form:
 
 ```bash
-$distro-smith --machine <machine> --distro <distro> --image <image> [--skip-build]
+$distro-smith --machine <machine> [--distro <distro>] [--image <image>] [--skip-build]
 ```
 
-Treat these as required inputs:
+Treat these as inputs:
 
-- `--machine <machine>`: target machine name used for partition and machine
-  bring-up.
+- `--machine <machine>`: **required.** Target machine name used for partition
+  and machine bring-up.
 - `--distro <distro>`: Yocto distro to use in the build configuration and to
-  write into `distro-params.yaml`.
+  write into `distro-params.yml`. Optional — defaults to `qcom-distro` when
+  not given.
 - `--image <image>`: image target to build and to write into
-  `distro-params.yaml`.
+  `distro-params.yml`. Optional — defaults to `qcom-console-image` when not
+  given.
 - `--skip-build`: explicit escape hatch for cases where the user wants to
-  raise the meta-qcom PR and produce `distro-params.yaml` without running
-  the kas build or build retry loop. Do not infer this option; only use it
-  when passed by the user.
+  raise the meta-qcom PR and produce `distro-params.yml` without running
+  the kas build or build retry loop.
 
-Do not use fallback distro or image names. If either `--distro` or `--image`
-is missing, stop before step 1 and ask for the missing value.
+Only run the internal build (step 2b) when this skill is invoked standalone
+(directly by a user or agent, not as part of a larger pipeline). If the
+invocation context indicates this skill is running inside the qli-orchestrator
+pipeline (or any other orchestrating pipeline) — e.g. the invoking prompt or
+conversation references an orchestrator, a numbered pipeline stage, or an
+already-initialized run log — skip the internal build regardless of whether
+`--skip-build` was passed, per step 2b. Otherwise, run the build by default
+unless `--skip-build` is explicitly passed.
 
 `qcom-yocto-new-machine` only writes the machine conf, CI yaml, and
 supporting recipes. It does not build, validate, run pre-PR checks, commit,
-open a PR, or write `distro-params.yaml`. Everything past file generation —
+open a PR, or write `distro-params.yml`. Everything past file generation —
 bumping `qcom-ptool.inc`'s `SRCREV`, running the build, retrying a failed
 build with a fix, committing, opening the meta-qcom PR, and writing
-`distro-params.yaml` — is this skill's own responsibility.
+`distro-params.yml` — is this skill's own responsibility.
 `qcom-yocto-new-machine`'s `SKILL.md` remains the source of truth for its
 own file-generation steps and prerequisites (env vars, checkout locations —
 see its Section 0).
@@ -69,17 +81,57 @@ see its Section 0).
 
 Parse `--machine`, `--distro`, and `--image` from the invocation. Use exactly
 the first value supplied for each argument throughout this run. Do not infer or
-replace these values later.
+replace these values later. If `--distro` is not supplied, default it to
+`qcom-distro`. If `--image` is not supplied, default it to
+`qcom-console-image`.
 
 Validate:
 
 - `--machine` is non-empty.
-- `--distro` is non-empty.
-- `--image` is non-empty.
 - `--skip-build`, if present, is recorded as an intentional validation skip
-  in status output, the PR body, and `distro-params.yaml`.
+  in status output, the PR body, and `distro-params.yml`.
 
 Then perform the meta-qcom scope check below.
+
+Before any cloning or `cd` into a checkout, capture the original cwd and
+derive the artifact path:
+
+```sh
+RUN_CWD="$(pwd -P)"
+WORK_ROOT_INPUT="${BUILD_DISTRO_ROOT:-$RUN_CWD/.distrosmith-work}"
+case "$WORK_ROOT_INPUT" in
+  /*) ;;
+  *)  WORK_ROOT_INPUT="$RUN_CWD/$WORK_ROOT_INPUT" ;;
+esac
+
+if [ -d "$WORK_ROOT_INPUT" ]; then
+  WORK_ROOT="$(cd "$WORK_ROOT_INPUT" && pwd -P)"
+else
+  WORK_ROOT_PARENT="$(dirname "$WORK_ROOT_INPUT")"
+  WORK_ROOT_BASENAME="$(basename "$WORK_ROOT_INPUT")"
+  if [ -d "$WORK_ROOT_PARENT" ]; then
+    WORK_ROOT="$(cd "$WORK_ROOT_PARENT" && pwd -P)/$WORK_ROOT_BASENAME"
+  else
+    WORK_ROOT="$WORK_ROOT_INPUT"
+  fi
+fi
+
+case "$RUN_CWD/" in
+  "$WORK_ROOT"/*) DISTRO_PARAMS_DIR="$(dirname "$WORK_ROOT")" ;;
+  *)              DISTRO_PARAMS_DIR="$RUN_CWD" ;;
+esac
+
+DISTRO_PARAMS_PATH="$DISTRO_PARAMS_DIR/distro-params.yml"
+export BUILD_DISTRO_ROOT="$WORK_ROOT"
+```
+
+Use `DISTRO_PARAMS_PATH` for every `distro-params.yml` write in this
+skill, including fast paths and failure paths. Never write
+`distro-params.yml` inside `WORK_ROOT` or any of its child directories. If
+the computed path would still be inside `WORK_ROOT`, stop and report the
+path problem instead of writing an artifact that cleanup can delete. Use
+the exported `BUILD_DISTRO_ROOT="$WORK_ROOT"` for the rest of the run so
+later `cd` commands do not change the default clone root.
 
 ### meta-qcom only
 
@@ -105,13 +157,13 @@ curl -s \
 ```
 
 If the response is a non-empty array, do not run the normal flow. Instead,
-write `distro-params.yaml` in the invocation cwd immediately and stop:
+write `DISTRO_PARAMS_PATH` immediately and stop:
 
 ```yaml
 status: "pass"
 
 repo:        "https://github.com/$DISTRO_GITHUB_ORG/meta-qcom.git"
-branch:      "add/<machine>"
+branch:      "master"
 type:        "distro"
 
 changes:
@@ -123,8 +175,13 @@ machine:      "<machine>"
 distro:       "<distro>"
 image:        "<image>"
 build_config: "ci/<machine>.yml:ci/<distro>.yml"
-build_result: "existing-pr"
 ```
+
+`branch` is the meta-qcom PR's *base* branch (the one `build-distro` syncs and
+builds from, per its Step 4) — not the PR's own head branch `add/<machine>`.
+It must match the `base` value used when the PR was opened (step 2c uses
+`"master"`); read it from the PR response's `base.ref` rather than
+hardcoding it, in case the target repo's default branch differs.
 
 This fast path exists so orchestrators can consume an already-open machine PR
 without repeating the partition/machine-conf generation flow. If the response
@@ -135,18 +192,17 @@ exists.
 ## 1. Run `qcom-partition-conf-new-board`
 
 Follow that skill's Sections 0-6 for the parsed `<machine>` exactly as documented —
-this includes the auto-merge step (Section 6). Capture two things
+this skill leaves the qcom-ptool PR open, it never merges it. Capture two things
 from its result:
 
 - The qcom-ptool PR's `html_url`.
-- The merge commit `sha` (from the `PUT .../pulls/{number}/merge`
-  response).
+- The PR's head commit `sha` (from the PR-creation response's `head.sha`,
+  or `GET .../pulls/{number}` if you need to re-fetch it).
 
 If that skill stops or fails at any point (missing board-spec entry,
-`schema_errors`, a real merge conflict, a `401`/`422` from the GitHub
-API), **stop the whole orchestration here** — report exactly what
-happened and do not proceed to step 2 with a partial or failed partition
-leg.
+`schema_errors`, a `401`/`422` from the GitHub API), **stop the whole
+orchestration here** — report exactly what happened and do not proceed to
+step 2 with a partial or failed partition leg.
 
 ## 2. Run `qcom-yocto-new-machine`
 
@@ -162,16 +218,24 @@ everything else: the `SRCREV` bump (step 2a), the build-retry loop (step
 
 ### 2a. Bump `qcom-ptool.inc`'s `SRCREV`
 
-Point the layer's `recipes-bsp/partition/qcom-ptool.inc` at the merge
-commit SHA captured in step 1:
+Point the layer's `recipes-bsp/partition/qcom-ptool.inc` at the PR head
+commit SHA captured in step 1. Since that commit lives only on the
+still-open `add/<machine>` branch of the fork (not on `main`), add
+`nobranch=1` to `SRC_URI` so bitbake's git fetcher checks out that exact
+SHA directly rather than requiring it to be reachable from a named branch:
 
 ```sh
 cd <meta-qcom-checkout>
 sed -i \
-  -e "s#^SRC_URI = .*#SRC_URI = \"git://github.com/\$DISTRO_GITHUB_ORG/qcom-ptool.git;branch=main;protocol=https\"#" \
-  -e "s#^SRCREV = .*#SRCREV = \"<merged-commit-sha-from-step-1>\"#" \
+  -e "s#^SRC_URI = .*#SRC_URI = \"git://github.com/\$DISTRO_GITHUB_ORG/qcom-ptool.git;protocol=https;nobranch=1\"#" \
+  -e "s#^SRCREV = .*#SRCREV = \"<pr-head-commit-sha-from-step-1>\"#" \
   recipes-bsp/partition/qcom-ptool.inc
 ```
+
+If the qcom-ptool PR is merged later (by hand) and `SRCREV` is moved to a
+commit that's actually on `main`, `nobranch=1` should be dropped again and
+`branch=main` restored — that's a follow-up edit for whoever merges it,
+not something this skill does automatically.
 
 This is its own atomic commit, separate from the `conf/machine: add
 <machine>` commit (per `AGENTS.md`'s "each patch must be logically
@@ -179,19 +243,25 @@ coherent, self-contained" rule):
 
 ```sh
 git add recipes-bsp/partition/qcom-ptool.inc
-git commit -s -m "recipes-bsp/partition: point qcom-ptool at merged <machine> partitions"
+git commit -s -m "recipes-bsp/partition: point qcom-ptool at <machine> partitions PR"
 ```
 
 ### 2b. Build with diagnose/fix/retry
 
-If `--skip-build` was passed, do not run `kas-container`, do not run the
-diagnose/fix/retry loop, and do not run `yocto-patchreview.sh` or
-`yocto-check-layer.sh`. Print a clear warning that validation was skipped by
-explicit user request, record `build_result: "skipped"` for step 3, and
-continue to step 2c.
+Skip the build (do not run `kas-container`, the diagnose/fix/retry loop, or
+`yocto-patchreview.sh`/`yocto-check-layer.sh`) whenever either of the
+following holds:
 
-Otherwise, run the first real build after the machine files are generated and
-`qcom-ptool.inc` has been bumped:
+- `--skip-build` was passed, or
+- this run is invoked as part of an orchestrating pipeline (see the
+  invocation-context rule above).
+
+In either case, print a clear warning explaining which condition caused the
+skip, note the skip reason for the PR body (step 2c), and continue to step 2c.
+
+Otherwise (standalone invocation, no `--skip-build`), run the first real
+build after the machine files are generated and `qcom-ptool.inc` has been
+bumped:
 
 ```sh
 export KAS_YAMLS="ci/<machine>.yml:ci/<distro>.yml"
@@ -220,7 +290,7 @@ directly) and attempt a fix:
   control (e.g. an upstream repo genuinely missing a package, a
   network/infra failure, a disk-space error), stop — do not keep
   iterating blindly. Skip step 2c (no commit/PR) and go to step 3 to write
-  `distro-params.yaml` with `status: "fail"`.
+  `distro-params.yml` with `status: "fail"`.
 - Any fix applied here becomes part of the same commit(s) in step 2c —
   don't create separate "fixup" commits; the change that goes into the PR
   should look like it was written correctly the first time.
@@ -239,10 +309,11 @@ before opening or updating the pull request.
 
 ### 2c. Commit and open the meta-qcom PR
 
-Only reachable after step 2b's build succeeded, or when `--skip-build` was
-explicitly passed. Do not commit or open/update a PR off a failed build.
-When `--skip-build` was passed, make the skipped validation visible in the PR
-body and in `distro-params.yaml`.
+Only reachable after step 2b's build succeeded, or when step 2b skipped the
+build (either because `--skip-build` was passed or this run is invoked as
+part of an orchestrating pipeline). Do not commit or open/update a PR off a
+failed build. When step 2b skipped the build, make the skipped validation
+visible in the PR body and in `distro-params.yml`.
 
 Commit following meta-qcom's `CONTRIBUTING.md`/`AGENTS.md`: split the
 change into logically separate, independently buildable commits rather
@@ -273,7 +344,7 @@ lands:
    land last. Subject: `conf/machine: add <machine>`.
 5. **The SRCREV bump** (step 2a) — already its own commit; land it after
    commit 4 since it depends on the machine's `QCOM_PARTITION_FILES_SUBDIR`
-   (set in commit 4) actually pointing at the merged partitions.
+   (set in commit 4) actually pointing at the PR'd partitions.
 
 Commits 1-3 add recipes nothing references yet, so they don't change any
 existing machine's behavior — safe to land independently of each other,
@@ -319,8 +390,9 @@ over rewriting one already pushed).
     "https://api.github.com/repos/$DISTRO_GITHUB_ORG/meta-qcom/pulls?head=$DISTRO_GITHUB_ORG:add/<machine>&state=open"
   ```
   A non-empty array means one's already open. Write the same
-  `distro-params.yaml` fast-path artifact described in step 0a, report its
-  `html_url`, and stop instead of creating a second PR.
+  `distro-params.yml` fast-path artifact described in step 0a to
+  `DISTRO_PARAMS_PATH`, report its `html_url`, and stop instead of
+  creating a second PR.
 
 Then open the PR against `$DISTRO_GITHUB_ORG/meta-qcom`'s default branch
 via the GitHub REST API (no `gh` CLI or browser step needed):
@@ -341,14 +413,14 @@ curl -s -X POST \
 EOF
 ```
 
-If `--skip-build` was passed, use this PR body instead:
+If step 2b skipped the build, use this PR body instead:
 
 ```json
 {
   "title": "conf/machine: add <machine>",
   "head": "add/<machine>",
   "base": "master",
-  "body": "Adds <machine> (<SoC>) via the distro-smith skill.\n\nValidation skipped by explicit --skip-build request; kas-container build, yocto-patchreview.sh, and yocto-check-layer.sh were not run.",
+  "body": "Adds <machine> (<SoC>) via the distro-smith skill.\n\nValidation skipped (--skip-build or orchestrating pipeline invocation); kas-container build, yocto-patchreview.sh, and yocto-check-layer.sh were not run.",
   "draft": false
 }
 ```
@@ -366,11 +438,13 @@ If `--skip-build` was passed, use this PR body instead:
   `qualcomm-linux/meta-qcom` is a separate, manual follow-up; don't do that
   without the user asking.
 
-## 3. Write `distro-params.yaml`
+## 3. Write `distro-params.yml`
 
 Always write this file, whether step 2b's build ultimately passed or
-failed — write it in the directory this `distro-smith` invocation was
-started from (the invocation cwd, not the `BUILD_DISTRO_ROOT` checkout).
+failed. Write it to `DISTRO_PARAMS_PATH`, computed in step 0 before any
+checkout work starts. That path must be outside `WORK_ROOT`
+(`${BUILD_DISTRO_ROOT:-<original-cwd>/.distrosmith-work}`), so a successful
+cleanup cannot delete the artifact.
 
 On a successful build + PR (step 2c ran):
 
@@ -378,7 +452,7 @@ On a successful build + PR (step 2c ran):
 status: "pass"
 
 repo:        "https://github.com/$DISTRO_GITHUB_ORG/meta-qcom.git"
-branch:      "add/<machine>"
+branch:      "master"
 type:        "distro"
 
 changes:
@@ -399,25 +473,25 @@ machine:      "<machine>"
 distro:       "<distro>"
 image:        "<image>"
 build_config: "<KAS_YAMLS value used, e.g. ci/<machine>.yml:ci/<distro>.yml>"
-build_result: "pass"
-validation:
-  build: "pass"
-  patchreview: "pass"
-  check_layer: "pass"
 ```
 
 - List every PR/commit the whole chain produced, in the order they were
-  applied: the qcom-ptool merge first, then the meta-qcom PR.
+  opened: the qcom-ptool PR first, then the meta-qcom PR. Both are left
+  open, not merged.
+- `branch` is the meta-qcom PR's base branch (`"master"`, matching step 2c's
+  PR-creation `base` field) — the branch `build-distro` checks out and
+  applies the PR onto — not the PR's own head branch `add/<machine>`.
 - `workspace`/`machine`/`distro`/`image`/`build_config` are filled with
   the actual values already known at this point, not left blank.
 
-On a successful PR with `--skip-build`:
+On a successful PR with the build skipped (`--skip-build` or an orchestrating
+pipeline invocation):
 
 ```yaml
 status: "pass"
 
 repo:        "https://github.com/$DISTRO_GITHUB_ORG/meta-qcom.git"
-branch:      "add/<machine>"
+branch:      "master"
 type:        "distro"
 
 changes:
@@ -431,15 +505,12 @@ machine:      "<machine>"
 distro:       "<distro>"
 image:        "<image>"
 build_config: "ci/<machine>.yml:ci/<distro>.yml"
-build_result: "skipped"
-validation:
-  build: "skipped by explicit --skip-build"
-  patchreview: "skipped by explicit --skip-build"
-  check_layer: "skipped by explicit --skip-build"
 ```
 
 This is still `status: "pass"` so qli-orchestrator can consume it and invoke
-`build-distro`, but the skipped validation must remain visible.
+`build-distro` — build-distro runs its own real build regardless of
+whether distro-smith's internal build ran, so the skip here isn't recorded
+in `distro-params.yml` itself; it's already visible in the PR body (step 2c).
 
 On a failed build (step 2b's retry cap was exhausted):
 
@@ -447,7 +518,7 @@ On a failed build (step 2b's retry cap was exhausted):
 status: "fail"
 
 repo:        "https://github.com/$DISTRO_GITHUB_ORG/meta-qcom.git"
-branch:      "add/<machine>"
+branch:      "master"
 type:        "distro"
 
 changes: []
@@ -457,7 +528,6 @@ machine:      "<machine>"
 distro:       "<distro>"
 image:        "<image>"
 build_config: "<KAS_YAMLS value used>"
-build_result: "fail"
 ```
 
 `machine`/`distro`/`image`/`build_config` stay filled in even on failure —
@@ -466,15 +536,20 @@ is empty since nothing was committed or opened.
 
 ## 4. Clean up the clone work directory
 
-Both underlying skills clone into `${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}`
-by default (see each skill's Section 0) — a directory under this
-invocation's cwd, not `/tmp`. Once `distro-params.yaml` is written
-(step 3), and only on a `status: "pass"` run, remove that work directory:
+Both underlying skills clone into `WORK_ROOT`
+(`${BUILD_DISTRO_ROOT:-<original-cwd>/.distrosmith-work}` by default; see
+each skill's Section 0) — a directory under this invocation's original cwd,
+not `/tmp`. Once `DISTRO_PARAMS_PATH` is written (step 3), and only on a
+`status: "pass"` run, remove that work directory:
 
 ```sh
-rm -rf "${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}"
+rm -rf "$WORK_ROOT"
 ```
 
+- Before deleting anything, verify `DISTRO_PARAMS_PATH` is outside
+  `WORK_ROOT`. If it is inside `WORK_ROOT`, move the file to
+  `$(dirname "$WORK_ROOT")/distro-params.yml` and update
+  `DISTRO_PARAMS_PATH` before removing `WORK_ROOT`.
 - On `status: "fail"`, leave the work directory in place instead — a
   failed build's checkout (source tree, build logs under
   `<layer-checkout>/build/tmp/log/`, bitbake's parsed state) is exactly
@@ -492,14 +567,20 @@ rm -rf "${BUILD_DISTRO_ROOT:-$(pwd)/.distrosmith-work}"
 
 ## Notes
 
-- Never skip the build step — the entire point of this skill over running
-  the two skills manually is that the build is real and gates the PR.
+- Run the build by default on a standalone invocation — the entire point of
+  this skill over running the two skills manually is that the build is real
+  and gates the PR. Only skip it when `--skip-build` is passed or this run is
+  invoked as part of an orchestrating pipeline (see step 2b).
 - A failed build gets one diagnose-and-fix pass (capped at 3 attempts,
   handled inside this skill's own step 2b) before this orchestration is
   treated as failed.
 - Never guess `DISTRO_GITHUB_ORG` — both underlying skills already stop
   and ask if it's unset; don't paper over that by guessing at this
   orchestration layer either.
-- Report progress at each step boundary (partition PR merged, build
-  result, SRCREV bumped, meta-qcom PR opened or build failed) rather than
+- Report progress at each step boundary (partition PR opened, SRCREV
+  bumped, build result, meta-qcom PR opened or build failed) rather than
   going silent until the very end — a real build can take a long time.
+- Neither this skill nor `qcom-partition-conf-new-board` ever merges the
+  qcom-ptool PR, whether the meta-qcom build against it passes or fails —
+  merging it (into the fork, and separately upstream) is always a manual
+  decision left to the user.

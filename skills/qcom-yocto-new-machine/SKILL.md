@@ -72,7 +72,7 @@ env vars below and clones the repos this skill needs.
   somewhere to push to. This skill itself never removes this checkout —
   leave it in place when done; only `distro-smith`'s own orchestration
   removes it, and only after that flow's own `distro-params.yaml` is
-  written.
+  written outside the work directory.
 - **`DISTRO_AUTOPILOT`** (optional, defaults to unset/false) — set it (or
   have the user ask to run this "non-interactively" / "just fill in
   placeholders for anything missing") to switch to **autopilot**: never

@@ -1,0 +1,7 @@
+{
+  "name": "distrosmith",
+  "description": "End-to-end distro bring-up for a new Qualcomm Yocto board: generates qcom-ptool partition files, brings up the machine conf/CI yaml, builds, and opens the meta-qcom PR.",
+  "author": {
+    "name": "Roshan Sivakumar"
+  }
+}
