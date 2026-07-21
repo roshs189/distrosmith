@@ -1,0 +1,14 @@
+{
+  "name": "distrosmith",
+  "description": "End-to-end distro bring-up for a new Qualcomm Yocto board: qcom-ptool partitions, machine conf/CI, build, and meta-qcom PR.",
+  "owner": {
+    "name": "Roshan Sivakumar"
+  },
+  "plugins": [
+    {
+      "name": "distrosmith",
+      "source": "./",
+      "description": "End-to-end distro bring-up for a new Qualcomm Yocto board"
+    }
+  ]
+}
